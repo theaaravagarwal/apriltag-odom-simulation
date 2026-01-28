@@ -154,7 +154,7 @@ offsetHeader.style.justifyContent = "space-between";
 offsetHeader.style.gap = "8px";
 
 const offsetTitle = document.createElement("div");
-offsetTitle.textContent = "Offsets";
+offsetTitle.textContent = "Settings";
 offsetTitle.style.fontWeight = "600";
 
 const offsetLockButton = document.createElement("button");
@@ -265,12 +265,21 @@ const detectionState = {
   imageSize: null,
   lastUpdated: 0,
   error: null,
-  autoCaptureEnabled: false,
-  autoCaptureInterval: null,
-  autoCaptureIntervalMs: 33.333, // 1 second between captures
-  lastDetectionFetch: null,
-  fetchInFlight: false,
+  autoCaptureEnabled: true,
+  autoCaptureIntervalMs: 100,
   detectionStatus: "waiting", // "waiting", "success", "error"
+};
+
+const websocketState = {
+  url: "ws://localhost:5174",
+  socket: null,
+  connected: false,
+  connecting: false,
+  reconnectDelayMs: 1000,
+  reconnectTimer: null,
+  sendInFlight: false,
+  sendInterval: null,
+  lastSentAt: null,
 };
 
 const tempQuat = new THREE.Quaternion();
@@ -338,6 +347,42 @@ function createOffsetSlider(labelText, min, max, step, initialValue, onChange) {
   input.addEventListener("input", () => {
     const nextValue = Number(input.value);
     value.textContent = `${nextValue}°`;
+    onChange(nextValue);
+  });
+
+  container.appendChild(label);
+  container.appendChild(input);
+  offsetPanel.appendChild(container);
+}
+
+function createSettingSlider(labelText, min, max, step, initialValue, unit, onChange) {
+  const container = document.createElement("div");
+  container.style.display = "grid";
+  container.style.gap = "4px";
+
+  const label = document.createElement("label");
+  label.style.display = "flex";
+  label.style.justifyContent = "space-between";
+  label.style.alignItems = "center";
+  label.style.gap = "8px";
+  label.style.fontSize = "12px";
+  label.textContent = labelText;
+
+  const value = document.createElement("span");
+  value.textContent = `${initialValue}${unit}`;
+  label.appendChild(value);
+
+  const input = document.createElement("input");
+  input.type = "range";
+  input.min = String(min);
+  input.max = String(max);
+  input.step = String(step);
+  input.value = String(initialValue);
+  input.style.width = "100%";
+
+  input.addEventListener("input", () => {
+    const nextValue = Number(input.value);
+    value.textContent = `${nextValue}${unit}`;
     onChange(nextValue);
   });
 
@@ -416,13 +461,15 @@ function updateHud() {
   const autoLabel = autoDriveState.enabled ? "ON" : "OFF";
   const autoCaptureLabel = detectionState.autoCaptureEnabled ? "AUTO" : "MANUAL";
   const detectionStatusLabel = detectionState.detectionStatus.toUpperCase();
-  const outputLabel = captureState.directoryHandle ? "dir set" : "dir not set";
-  const savedLabel = captureState.lastSaved ? `last=${captureState.lastSaved}` : "ready";
+  const outputLabel = websocketState.connected ? "ws connected" : "ws disconnected";
+  const savedLabel = websocketState.lastSentAt
+    ? `last=${new Date(websocketState.lastSentAt).toLocaleTimeString()}`
+    : "ready";
   hud.textContent =
     `Auto-drive: ${autoLabel}\n` +
     `Capture: ${autoCaptureLabel}, ${outputLabel}, ${savedLabel}\n` +
     `Detections: ${detectionStatusLabel} (${detectionState.detections.length})\n` +
-    "Keys: M=drive O=output P=photo K=auto-capture C=center H=field\n" +
+    "Keys: M=drive O=output P=send K=auto-send C=center H=field\n" +
     "Move: W/S forward/back A/D turn\n" +
     "Mouse: drag to look (POV)";
 }
@@ -976,75 +1023,129 @@ function drawDetectionOutlines(ctx, width, height) {
   ctx.restore();
 }
 
-// Function to fetch latest detections from JSON file with cache busting
-async function fetchLatestDetections() {
-  try {
-    // Try multiple possible paths for the JSON file
-    const paths = [
-      '../tagoutput1/latest_detections.json',
-      './tagoutput1/latest_detections.json',
-      'tagoutput1/latest_detections.json',
-      '/tagoutput1/latest_detections.json'
-    ];
+function setDetectionStatus(status, errorMessage = null) {
+  detectionState.detectionStatus = status;
+  detectionState.error = errorMessage;
+  updateDetectionStatusUI();
+}
 
-    for (const path of paths) {
-      try {
-        // Add cache-busting parameter
-        const cacheBustUrl = `${path}?t=${Date.now()}`;
-        const response = await fetch(cacheBustUrl, {
-          cache: 'no-cache',
-          headers: {
-            'Cache-Control': 'no-cache'
-          }
-        });
-        if (response.ok) {
-          const data = await response.json();
-          return data;
-        }
-      } catch (fetchError) {
-        // Try next path
-        continue;
-      }
-    }
-
-    // If all paths failed, return null
-    return null;
-  } catch (error) {
-    console.warn("Error fetching detections:", error);
-    return null;
+function handleDetectionMessage(data) {
+  if (!data) {
+    return;
+  }
+  if (data.type === "error") {
+    setDetectionStatus("error", data.message || "Detection error");
+    return;
+  }
+  if (data.detections) {
+    detectionState.detections = data.detections;
+    detectionState.imageSize = data.image_size || data.imageSize || [960, 720];
+    detectionState.lastUpdated = Date.now();
+    setDetectionStatus("success", null);
   }
 }
 
-// Function to periodically update detection state
-async function updateDetectionState() {
-  if (detectionState.fetchInFlight) {
+function scheduleWebsocketReconnect() {
+  if (websocketState.reconnectTimer) {
     return;
   }
-  detectionState.fetchInFlight = true;
-  detectionState.lastDetectionFetch = Date.now();
-  try {
-    const data = await fetchLatestDetections();
+  websocketState.reconnectTimer = setTimeout(() => {
+    websocketState.reconnectTimer = null;
+    connectWebsocket();
+  }, websocketState.reconnectDelayMs);
+}
 
-    if (data && data.detections) {
-      detectionState.detections = data.detections;
-      detectionState.imageSize = data.image_size || [960, 720]; // Default size
-      detectionState.lastUpdated = Date.now();
-      detectionState.error = null;
-      detectionState.detectionStatus = "success";
-    } else {
-      detectionState.detections = [];
-      detectionState.detectionStatus = "waiting";
+function connectWebsocket() {
+  if (websocketState.connected || websocketState.connecting) {
+    return;
+  }
+  websocketState.connecting = true;
+  try {
+    const socket = new WebSocket(websocketState.url);
+    socket.binaryType = "arraybuffer";
+    websocketState.socket = socket;
+
+    socket.addEventListener("open", () => {
+      websocketState.connected = true;
+      websocketState.connecting = false;
+      setDetectionStatus("waiting", null);
+      if (detectionState.autoCaptureEnabled) {
+        startWebsocketSendLoop();
+      }
+    });
+
+    socket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        try {
+          const payload = JSON.parse(event.data);
+          handleDetectionMessage(payload);
+        } catch (error) {
+          setDetectionStatus("error", "Invalid detection payload");
+        }
+      }
+    });
+
+    socket.addEventListener("close", () => {
+      websocketState.connected = false;
+      websocketState.connecting = false;
+      websocketState.socket = null;
+      stopWebsocketSendLoop();
+      setDetectionStatus("waiting", "WebSocket closed");
+      scheduleWebsocketReconnect();
+    });
+
+    socket.addEventListener("error", () => {
+      websocketState.connected = false;
+      websocketState.connecting = false;
+      websocketState.socket = null;
+      stopWebsocketSendLoop();
+      setDetectionStatus("error", "WebSocket error");
+      scheduleWebsocketReconnect();
+    });
+  } catch (error) {
+    websocketState.connecting = false;
+    setDetectionStatus("error", "WebSocket init failed");
+    scheduleWebsocketReconnect();
+  }
+}
+
+function stopWebsocketSendLoop() {
+  if (websocketState.sendInterval) {
+    clearInterval(websocketState.sendInterval);
+    websocketState.sendInterval = null;
+  }
+}
+
+function startWebsocketSendLoop() {
+  stopWebsocketSendLoop();
+  websocketState.sendInterval = setInterval(() => {
+    if (!websocketState.connected || !detectionState.autoCaptureEnabled) {
+      return;
+    }
+    sendPovFrame();
+  }, detectionState.autoCaptureIntervalMs);
+}
+
+async function sendPovFrame() {
+  if (!websocketState.connected || websocketState.sendInFlight) {
+    return;
+  }
+  websocketState.sendInFlight = true;
+  try {
+    const blob = await renderCaptureBlob();
+    if (!blob) {
+      return;
+    }
+    const arrayBuffer = await blob.arrayBuffer();
+    if (websocketState.socket && websocketState.socket.readyState === WebSocket.OPEN) {
+      websocketState.socket.send(arrayBuffer);
+      websocketState.lastSentAt = Date.now();
     }
   } catch (error) {
-    detectionState.error = error.message;
-    detectionState.detectionStatus = "error";
-    console.warn("Error fetching detections:", error);
+    setDetectionStatus("error", "Failed to send POV frame");
   } finally {
-    detectionState.fetchInFlight = false;
+    websocketState.sendInFlight = false;
   }
-
-  // Update the status indicator in the UI
-  updateDetectionStatusUI();
 }
 
 // Function to update the detection status indicator in the UI
@@ -1176,20 +1277,13 @@ async function captureFrame() {
 function toggleAutoCapture() {
   if (detectionState.autoCaptureEnabled) {
     // Disable auto capture
-    if (detectionState.autoCaptureInterval) {
-      clearInterval(detectionState.autoCaptureInterval);
-      detectionState.autoCaptureInterval = null;
-    }
     detectionState.autoCaptureEnabled = false;
+    stopWebsocketSendLoop();
     console.log("Auto capture disabled");
   } else {
     // Enable auto capture
     detectionState.autoCaptureEnabled = true;
-    detectionState.autoCaptureInterval = setInterval(() => {
-      if (!captureState.inProgress) {
-        captureFrame();
-      }
-    }, detectionState.autoCaptureIntervalMs);
+    startWebsocketSendLoop();
     console.log("Auto capture enabled");
   }
   updateHud();
@@ -1503,7 +1597,7 @@ function setupKeyboardControls() {
       return;
     }
     if (event.code === "KeyP") {
-      captureFrame();
+      sendPovFrame();
       event.preventDefault();
       return;
     }
@@ -1709,6 +1803,8 @@ async function init() {
     }
   });
   console.log(`Scene total: ${totalMeshes} meshes, ${totalVertices} vertices`);
+
+  connectWebsocket();
 }
 
 function onResize() {
@@ -1724,6 +1820,13 @@ window.addEventListener("resize", onResize);
 
 setupCameraControls();
 setupKeyboardControls();
+
+createSettingSlider("WS interval", 30, 500, 10, detectionState.autoCaptureIntervalMs, "ms", (value) => {
+  detectionState.autoCaptureIntervalMs = value;
+  if (detectionState.autoCaptureEnabled && websocketState.connected) {
+    startWebsocketSendLoop();
+  }
+});
 
 createOffsetSlider("Camera yaw", -180, 180, 1, 90, (value) => {
   offsetState.yawDeg = value;
@@ -1759,14 +1862,6 @@ function animate() {
     console.log(`FPS: ${frameCount}`);
     frameCount = 0;
     lastTime = elapsedSeconds;
-  }
-
-  // Periodically update detection state (every 500ms)
-  if (
-    Date.now() - (detectionState.lastDetectionFetch || 0) > 500 &&
-    !detectionState.fetchInFlight
-  ) {
-    updateDetectionState();
   }
 
   updateRobot(deltaSeconds);
