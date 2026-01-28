@@ -193,6 +193,7 @@ const robotCameraState = {
   rig: new THREE.Object3D(),
   config: null,
   ready: false,
+  basePosition: new THREE.Vector3(),
 };
 
 const captureState = {
@@ -241,6 +242,11 @@ const robotOffsetState = {
   yawDeg: 90,
   pitchDeg: -90,
   rollDeg: 0,
+};
+const cameraOffsetState = {
+  x: 0.3,
+  y: 0,
+  z: -0.15,
 };
 
 function createOffsetSlider(labelText, min, max, step, initialValue, onChange) {
@@ -291,6 +297,17 @@ function applyRobotVisualOffset() {
     robotVisualBaseRotation.x + pitchOffset,
     robotVisualBaseRotation.y + yawOffset,
     robotVisualBaseRotation.z + rollOffset
+  );
+}
+
+function applyRobotCameraOffset() {
+  if (!robotCameraState.ready) {
+    return;
+  }
+  robotCameraState.rig.position.set(
+    robotCameraState.basePosition.x + cameraOffsetState.x,
+    robotCameraState.basePosition.y + cameraOffsetState.y,
+    robotCameraState.basePosition.z + cameraOffsetState.z
   );
 }
 
@@ -697,12 +714,14 @@ function configureRobotCamera(robotConfig) {
     cameraConfig.position?.[1] ?? 0,
     cameraConfig.position?.[2] ?? 0
   );
+  robotCameraState.basePosition.copy(robotCameraState.rig.position);
   robotCameraState.rig.rotation.set(0, 0, 0);
   applyRotations(robotCameraState.rig, cameraConfig.rotations);
   if (!robotCameraState.rig.parent && robot) {
     robot.add(robotCameraState.rig);
   }
   robotCameraState.ready = true;
+  applyRobotCameraOffset();
 
   if (typeof cameraConfig.fov === "number") {
     povCamera.fov = cameraConfig.fov;
@@ -1425,6 +1444,18 @@ createOffsetSlider("Pitch offset", -90, 90, 1, 90, (value) => {
 });
 createOffsetSlider("Roll offset", -180, 180, 1, 0, (value) => {
   offsetState.rollDeg = value;
+});
+createOffsetSlider("Camera X", -2, 2, 0.01, 0.3, (value) => {
+  cameraOffsetState.x = value;
+  applyRobotCameraOffset();
+});
+createOffsetSlider("Camera Y", -2, 2, 0.01, 0, (value) => {
+  cameraOffsetState.y = value;
+  applyRobotCameraOffset();
+});
+createOffsetSlider("Camera Z", -2, 2, 0.01, -0.15, (value) => {
+  cameraOffsetState.z = value;
+  applyRobotCameraOffset();
 });
 createOffsetSlider("Robot yaw", -180, 180, 1, 90, (value) => {
   robotOffsetState.yawDeg = value;
