@@ -7,6 +7,12 @@ const FIELD_MODEL_URL = "./field/model.glb";
 const FIELD_CONFIG_URL = "./field/config.json";
 const ROBOT_MODEL_URL = "./robot/model.glb";
 const ROBOT_CONFIG_URL = "./robot/config.json";
+const OPTIMIZE_MODE = import.meta.env.MODE === "opt" || import.meta.env.VITE_OPT_MODE === "1";
+const CAPTURE_SCALE = OPTIMIZE_MODE ? 0.5 : 1;
+const CAPTURE_MIME = OPTIMIZE_MODE ? "image/jpeg" : "image/png";
+const CAPTURE_JPEG_QUALITY = OPTIMIZE_MODE ? 0.6 : undefined;
+const VISION_MIN_WIDTH = OPTIMIZE_MODE ? 160 : 240;
+const VISION_MIN_HEIGHT = OPTIMIZE_MODE ? 120 : 180;
 
 const TAG_OVERRIDES = {
   // Examples:
@@ -62,13 +68,13 @@ const povCamera = new THREE.PerspectiveCamera(
 );
 let povCameraBaseFov = povCamera.fov;
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+const renderer = new THREE.WebGLRenderer({ antialias: !OPTIMIZE_MODE });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, OPTIMIZE_MODE ? 1.0 : 1.5));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMapping = OPTIMIZE_MODE ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
-renderer.shadowMap.enabled = true;
+renderer.shadowMap.enabled = !OPTIMIZE_MODE;
 renderer.shadowMap.type = THREE.PCFShadowMap;
 app.appendChild(renderer.domElement);
 renderer.domElement.style.touchAction = "none";
@@ -240,6 +246,7 @@ const captureState = {
   inProgress: false,
   width: null,
   height: null,
+  scale: CAPTURE_SCALE,
   target: null,
   buffer: null,
   canvas: null,
@@ -248,8 +255,8 @@ const captureState = {
 
 const visionState = {
   enabled: true,
-  width: 480,
-  height: 360,
+  width: OPTIMIZE_MODE ? 320 : 480,
+  height: OPTIMIZE_MODE ? 240 : 360,
   target: null,
   buffer: null,
   imageData: null,
@@ -827,10 +834,14 @@ function configureRobotCamera(robotConfig) {
   }
 
   if (Array.isArray(cameraConfig.resolution) && cameraConfig.resolution.length === 2) {
-    captureState.width = cameraConfig.resolution[0];
-    captureState.height = cameraConfig.resolution[1];
-    const targetWidth = Math.max(240, Math.round(cameraConfig.resolution[0] * 0.4));
-    const targetHeight = Math.max(180, Math.round(cameraConfig.resolution[1] * 0.4));
+    const baseWidth = cameraConfig.resolution[0];
+    const baseHeight = cameraConfig.resolution[1];
+    const scaledWidth = Math.max(1, Math.round(baseWidth * captureState.scale));
+    const scaledHeight = Math.max(1, Math.round(baseHeight * captureState.scale));
+    captureState.width = scaledWidth;
+    captureState.height = scaledHeight;
+    const targetWidth = Math.max(VISION_MIN_WIDTH, Math.round(scaledWidth * 0.4));
+    const targetHeight = Math.max(VISION_MIN_HEIGHT, Math.round(scaledHeight * 0.4));
     ensureVisionTarget(targetWidth, targetHeight);
   }
 }
@@ -909,8 +920,11 @@ function ensureCaptureTarget(width, height) {
 }
 
 function renderCaptureBlob() {
-  const width = captureState.width || renderer.domElement.width;
-  const height = captureState.height || renderer.domElement.height;
+  const baseWidth = captureState.width || renderer.domElement.width;
+  const baseHeight = captureState.height || renderer.domElement.height;
+  const scale = captureState.width == null ? captureState.scale : 1;
+  const width = Math.max(1, Math.round(baseWidth * scale));
+  const height = Math.max(1, Math.round(baseHeight * scale));
   ensureCaptureTarget(width, height);
 
   const prevAspect = povCamera.aspect;
@@ -945,7 +959,11 @@ function renderCaptureBlob() {
   ctx.putImageData(imageData, 0, 0);
 
   return new Promise((resolve) => {
-    canvas.toBlob(resolve, "image/png");
+    if (CAPTURE_MIME === "image/jpeg") {
+      canvas.toBlob(resolve, CAPTURE_MIME, CAPTURE_JPEG_QUALITY);
+    } else {
+      canvas.toBlob(resolve, CAPTURE_MIME);
+    }
   });
 }
 
@@ -1812,7 +1830,7 @@ function onResize() {
   mainCamera.updateProjectionMatrix();
   povCamera.aspect = window.innerWidth / window.innerHeight;
   povCamera.updateProjectionMatrix();
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, OPTIMIZE_MODE ? 1.0 : 1.5));
   renderer.setSize(window.innerWidth, window.innerHeight);
 }
 

@@ -9,7 +9,7 @@ import json
 import os
 import time
 import threading
-import requests
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime
 
@@ -28,8 +28,15 @@ except ImportError:
 
 
 class AutoCaptureDetector:
-    def __init__(self, capture_dir="tagoutput1", field_config_path="field_config.json", 
-                 tag_map_path="tag_map_field.json", capture_interval=2.0):
+    def __init__(
+        self,
+        capture_dir="tagoutput1",
+        field_config_path="field_config.json",
+        tag_map_path="tag_map_field.json",
+        capture_interval=2.0,
+        worker_threads=0,
+        detector_threads=0,
+    ):
         self.capture_dir = Path(capture_dir)
         self.capture_dir.mkdir(exist_ok=True)
         self.capture_interval = capture_interval  # seconds between captures
@@ -46,8 +53,15 @@ class AutoCaptureDetector:
             for tag in self.field_config["aprilTags"]:
                 self.expected_tags[tag["id"]] = tag
         
-        # Initialize AprilTag detector
-        self.detector = Detector(families='tag36h11')
+        # Threading configuration
+        self.worker_threads = self.resolve_worker_threads(worker_threads)
+        self.detector_threads = self.resolve_detector_threads(detector_threads, self.worker_threads)
+        self._detector_local = threading.local()
+        self._executor = None
+        self._lock = threading.Lock()
+        self._inflight_images = set()
+        self._latest_output_mtime = 0.0
+        self._last_stats_report = 0
         
         # Tracking variables
         self.last_processed_images = set()
@@ -75,6 +89,27 @@ class AutoCaptureDetector:
         except Exception as e:
             print(f"Error loading {path}: {e}")
             return None
+
+    def resolve_worker_threads(self, worker_threads):
+        cpu_count = os.cpu_count() or 1
+        if worker_threads and worker_threads > 0:
+            return int(worker_threads)
+        return max(1, cpu_count - 1)
+
+    def resolve_detector_threads(self, detector_threads, worker_threads):
+        cpu_count = os.cpu_count() or 1
+        if detector_threads and detector_threads > 0:
+            return int(detector_threads)
+        if worker_threads > 1:
+            return 1
+        return max(1, cpu_count - 1)
+
+    def get_detector(self):
+        detector = getattr(self._detector_local, "detector", None)
+        if detector is None:
+            detector = Detector(families="tag36h11", nthreads=self.detector_threads)
+            self._detector_local.detector = detector
+        return detector
     
     def detect_apriltags_in_image(self, image_path):
         """Detect AprilTags in a single image file."""
@@ -91,7 +126,8 @@ class AutoCaptureDetector:
             cx, cy = width / 2, height / 2  # Principal point at center
             
             # Detect tags
-            detections = self.detector.detect(
+            detector = self.get_detector()
+            detections = detector.detect(
                 image,
                 estimate_tag_pose=True,
                 camera_params=(fx, fy, cx, cy),
@@ -149,7 +185,7 @@ class AutoCaptureDetector:
             "valid": is_expected and is_confident and is_accurate
         }
     
-    def update_stats(self, detections, image_path):
+    def update_stats(self, detections, image_path, image_mtime):
         """Update statistics based on detections."""
         self.stats["total_frames"] += 1
         self.stats["last_update"] = datetime.now().strftime("%H:%M:%S")
@@ -172,12 +208,15 @@ class AutoCaptureDetector:
                 if count > 0:
                     self.stats["avg_decision_margin"] = total_margin / count
         
-        # Write latest detections to JSON file
-        self.write_latest_detections(detections, image_path)
+        # Write latest detections to JSON file if newer than current output
+        if image_mtime >= self._latest_output_mtime:
+            self._latest_output_mtime = image_mtime
+            self.write_latest_detections(detections, image_path)
     
     def write_latest_detections(self, detections, image_path):
         """Write the latest detections to the JSON file."""
         output_path = self.capture_dir / "latest_detections.json"
+        tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
         
         # Prepare data structure similar to the simulation format
         data = {
@@ -188,33 +227,51 @@ class AutoCaptureDetector:
         }
         
         try:
-            with open(output_path, "w", encoding="utf-8") as f:
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
+            os.replace(tmp_path, output_path)
         except Exception as e:
             print(f"Error writing detections to {output_path}: {e}")
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
     
     def process_new_captures(self):
         """Process any new capture files that haven't been processed yet."""
         # Find all PNG files in the capture directory
         png_files = list(self.capture_dir.glob("apriltag_frame_*.png"))
-        
-        # Process any new files
-        for image_path in png_files:
-            if str(image_path) not in self.last_processed_images:
-                print(f"Processing new capture: {image_path.name}")
-                
-                # Detect tags in the image
-                detections = self.detect_apriltags_in_image(image_path)
-                
-                # Validate and update stats
-                self.update_stats(detections, image_path)
-                
-                # Mark as processed
-                self.last_processed_images.add(str(image_path))
-                
-                # Print summary
-                valid_count = sum(1 for det in detections if self.validate_detection(det)["valid"])
-                print(f"  Found {len(detections)} tags, {valid_count} valid")
+        png_files.sort(key=lambda path: path.stat().st_mtime if path.exists() else 0)
+
+        new_paths = []
+        with self._lock:
+            for image_path in png_files:
+                path_str = str(image_path)
+                if path_str in self.last_processed_images or path_str in self._inflight_images:
+                    continue
+                self._inflight_images.add(path_str)
+                new_paths.append(image_path)
+
+        for image_path in new_paths:
+            print(f"Processing new capture: {image_path.name}")
+            self._executor.submit(self._process_single_image, image_path)
+
+    def _process_single_image(self, image_path):
+        try:
+            image_mtime = image_path.stat().st_mtime
+        except Exception:
+            image_mtime = time.time()
+
+        detections = self.detect_apriltags_in_image(image_path)
+        valid_count = sum(1 for det in detections if self.validate_detection(det)["valid"])
+
+        with self._lock:
+            self.update_stats(detections, image_path, image_mtime)
+            self.last_processed_images.add(str(image_path))
+            self._inflight_images.discard(str(image_path))
+
+        print(f"  Found {len(detections)} tags, {valid_count} valid")
     
     def continuous_capture_monitor(self):
         """Monitor for new captures in a continuous loop."""
@@ -223,11 +280,14 @@ class AutoCaptureDetector:
             self.process_new_captures()
             
             # Print stats periodically
-            if self.stats["total_frames"] % 10 == 0 and self.stats["total_frames"] > 0:
-                print(f"\nStats - Total: {self.stats['total_frames']}, "
-                      f"Detections: {self.stats['frames_with_detections']}, "
-                      f"Valid: {self.stats['valid_detections']}, "
-                      f"Avg Margin: {self.stats['avg_decision_margin']:.2f}")
+            with self._lock:
+                total_frames = self.stats["total_frames"]
+                if total_frames > 0 and total_frames % 10 == 0 and total_frames != self._last_stats_report:
+                    self._last_stats_report = total_frames
+                    print(f"\nStats - Total: {total_frames}, "
+                          f"Detections: {self.stats['frames_with_detections']}, "
+                          f"Valid: {self.stats['valid_detections']}, "
+                          f"Avg Margin: {self.stats['avg_decision_margin']:.2f}")
             
             # Wait a bit before checking again
             time.sleep(0.5)
@@ -239,6 +299,7 @@ class AutoCaptureDetector:
         print(f"Capture interval: {self.capture_interval}s")
         print("Press Ctrl+C to stop")
         
+        self._executor = ThreadPoolExecutor(max_workers=self.worker_threads)
         self.running = True
         self.capture_thread = threading.Thread(target=self.continuous_capture_monitor)
         self.capture_thread.daemon = True
@@ -257,6 +318,8 @@ class AutoCaptureDetector:
         self.running = False
         if self.capture_thread:
             self.capture_thread.join(timeout=2)
+        if self._executor:
+            self._executor.shutdown(wait=True)
 
 
 def main():
@@ -269,6 +332,10 @@ def main():
                        help="Path to field configuration JSON")
     parser.add_argument("--tag-map", default="tag_map_field.json",
                        help="Path to tag map JSON")
+    parser.add_argument("--worker-threads", type=int, default=0,
+                       help="Worker threads for processing (0=auto)")
+    parser.add_argument("--detector-threads", type=int, default=0,
+                       help="Threads per detector (0=auto)")
     
     args = parser.parse_args()
     
@@ -276,7 +343,9 @@ def main():
         capture_dir=args.capture_dir,
         capture_interval=args.capture_interval,
         field_config_path=args.field_config,
-        tag_map_path=args.tag_map
+        tag_map_path=args.tag_map,
+        worker_threads=args.worker_threads,
+        detector_threads=args.detector_threads,
     )
     
     detector.start()

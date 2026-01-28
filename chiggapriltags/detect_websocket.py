@@ -3,12 +3,13 @@ import asyncio
 import json
 import os
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
 from tag_map_odometry import compute_camera_pose_from_map, load_tag_map
 from detect_stream import (
-    build_detector,
     compute_camera_intrinsics,
     detection_to_dict,
     enhance_image,
@@ -49,6 +50,54 @@ def build_error(message):
         "message": message,
         "timestamp": time.time(),
     }
+
+
+def resolve_worker_threads(worker_threads):
+    cpu_count = os.cpu_count() or 1
+    if worker_threads and worker_threads > 0:
+        return int(worker_threads)
+    return max(1, cpu_count - 1)
+
+
+def resolve_detector_threads(detector_threads, worker_threads):
+    cpu_count = os.cpu_count() or 1
+    if detector_threads and detector_threads > 0:
+        return int(detector_threads)
+    if worker_threads > 1:
+        return 1
+    return max(1, cpu_count - 1)
+
+
+def build_detector_with_threads(args, detector_threads):
+    try:
+        from pupil_apriltags import Detector
+    except Exception as exc:
+        raise RuntimeError(
+            "pupil-apriltags is required. Install with: pip install pupil-apriltags"
+        ) from exc
+
+    return Detector(
+        families=args.family,
+        nthreads=detector_threads,
+        quad_decimate=args.quad_decimate,
+        quad_sigma=args.quad_sigma,
+        refine_edges=args.refine_edges,
+        decode_sharpening=args.decode_sharpening,
+        debug=0,
+    )
+
+
+def make_detector_provider(args, detector_threads):
+    detector_local = threading.local()
+
+    def get_detector():
+        detector = getattr(detector_local, "detector", None)
+        if detector is None:
+            detector = build_detector_with_threads(args, detector_threads)
+            detector_local.detector = detector
+        return detector
+
+    return get_detector
 
 
 def maybe_fuse_pose(det_dicts, tag_map):
@@ -123,7 +172,50 @@ def detect_tags(image, detector, args, camera_config, tag_map, tag_size):
     return det_dicts, fused_pose, width, height
 
 
-async def handle_client(websocket, args, detector, tag_map, tag_size, camera_config):
+def detect_tags_worker(image, detector_provider, args, camera_config, tag_map, tag_size):
+    detector = detector_provider()
+    return detect_tags(image, detector, args, camera_config, tag_map, tag_size)
+
+
+def process_message_worker(message, detector_provider, args, camera_config, tag_map, tag_size):
+    image = decode_png(message)
+    return detect_tags_worker(image, detector_provider, args, camera_config, tag_map, tag_size)
+
+
+async def handle_client(websocket, args, detector_provider, tag_map, tag_size, camera_config, executor):
+    loop = asyncio.get_running_loop()
+    latest_message = None
+    processing = False
+    def is_ws_closed():
+        return getattr(websocket, "closed", False) or getattr(websocket, "close_code", None) is not None
+
+    async def process_latest():
+        nonlocal latest_message, processing
+        while latest_message is not None:
+            message = latest_message
+            latest_message = None
+            start = time.time()
+            try:
+                det_dicts, fused_pose, width, height = await loop.run_in_executor(
+                    executor,
+                    process_message_worker,
+                    message,
+                    detector_provider,
+                    args,
+                    camera_config,
+                    tag_map,
+                    tag_size,
+                )
+                elapsed_ms = (time.time() - start) * 1000.0
+                response = build_payload(det_dicts, fused_pose, width, height, elapsed_ms)
+                if is_ws_closed():
+                    break
+                await websocket.send(json.dumps(response))
+            except Exception as exc:
+                if is_ws_closed():
+                    break
+                await websocket.send(json.dumps(build_error(str(exc))))
+        processing = False
     async for message in websocket:
         if isinstance(message, str):
             try:
@@ -134,17 +226,10 @@ async def handle_client(websocket, args, detector, tag_map, tag_size, camera_con
                 await websocket.send(json.dumps({"type": "pong", "timestamp": time.time()}))
             continue
 
-        start = time.time()
-        try:
-            image = decode_png(message)
-            det_dicts, fused_pose, width, height = detect_tags(
-                image, detector, args, camera_config, tag_map, tag_size
-            )
-            elapsed_ms = (time.time() - start) * 1000.0
-            response = build_payload(det_dicts, fused_pose, width, height, elapsed_ms)
-            await websocket.send(json.dumps(response))
-        except Exception as exc:
-            await websocket.send(json.dumps(build_error(str(exc))))
+        latest_message = message
+        if not processing:
+            processing = True
+            asyncio.create_task(process_latest())
 
 
 async def run_server(args):
@@ -172,21 +257,27 @@ async def run_server(args):
         if os.path.exists(tag_map_path):
             tag_map = load_tag_map(tag_map_path)
 
-    detector = build_detector(args)
+    worker_threads = resolve_worker_threads(args.worker_threads)
+    detector_threads = resolve_detector_threads(args.nthreads, worker_threads)
+    detector_provider = make_detector_provider(args, detector_threads)
+    executor = ThreadPoolExecutor(max_workers=worker_threads)
 
     async def handler(websocket):
-        await handle_client(websocket, args, detector, tag_map, tag_size, camera_config)
+        await handle_client(websocket, args, detector_provider, tag_map, tag_size, camera_config, executor)
 
-    async with websockets.serve(
-        handler,
-        args.host,
-        args.port,
-        max_size=args.max_message_bytes,
-        ping_interval=20,
-        ping_timeout=20,
-    ):
-        print(f"WebSocket detector listening on ws://{args.host}:{args.port}")
-        await asyncio.Future()
+    try:
+        async with websockets.serve(
+            handler,
+            args.host,
+            args.port,
+            max_size=args.max_message_bytes,
+            ping_interval=20,
+            ping_timeout=20,
+        ):
+            print(f"WebSocket detector listening on ws://{args.host}:{args.port}")
+            await asyncio.Future()
+    finally:
+        executor.shutdown(wait=True)
 
 
 def main(argv=None):
@@ -206,6 +297,7 @@ def main(argv=None):
     parser.add_argument("--cx", type=float, default=None, help="Principal point x in pixels")
     parser.add_argument("--cy", type=float, default=None, help="Principal point y in pixels")
     parser.add_argument("--nthreads", type=int, default=0, help="Detector threads (0=auto)")
+    parser.add_argument("--worker-threads", type=int, default=0, help="Worker threads (0=auto)")
     parser.add_argument("--quad-decimate", type=float, default=1.0, help="Quad decimate")
     parser.add_argument("--quad-sigma", type=float, default=0.8, help="Quad sigma")
     parser.add_argument("--refine-edges", type=int, default=1, help="Refine edges (0/1)")
