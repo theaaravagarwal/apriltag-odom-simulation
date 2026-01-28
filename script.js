@@ -14,21 +14,21 @@ const TAG_OVERRIDES = {
   // 2: { rotationOffsetDeg: 90 },
   // 3: { rotationX: 45, rotationY: 30, rotationZ: 90 },
   // "1-5": { rotationY: 180 }, // Applies to tags 1 through 5
-  "3-4": {rotationY: 180, rotationZ: 180},
-  1: {rotationY: 180, rotationZ: 180},
-  6: {rotationY: 180, rotationZ: 180},
-  "13-16": {rotationY: 180, rotationZ: 180},
-  "25-26": {rotationY: 180, rotationZ: 180},
-  23: {rotationY: 180, rotationZ: 180},
-  5: {rotationX: 270, rotationZ: 270, rotationY: 180},
-  8: {rotationX: 270, rotationZ: 270, rotationY: 180},
-  2: {rotationX: 270, rotationZ: 90, rotationY: 180},
-  11: {rotationX: 270, rotationZ: 90, rotationY: 180},
-  21: {rotationX: 270, rotationZ: 90, rotationY: 180},
-  24: {rotationX: 270, rotationZ: 90, rotationY: 180},
-  18: {rotationX: 270, rotationZ: 270, rotationY: 180},
-  27: {rotationX: 270, rotationZ: 270, rotationY: 180},
-  28: {rotationX: 180, rotationZ: 0, rotationY: 0}
+  "3-4": { rotationY: 180, rotationZ: 180 },
+  1: { rotationY: 180, rotationZ: 180 },
+  6: { rotationY: 180, rotationZ: 180 },
+  "13-16": { rotationY: 180, rotationZ: 180 },
+  "25-26": { rotationY: 180, rotationZ: 180 },
+  23: { rotationY: 180, rotationZ: 180 },
+  5: { rotationX: 270, rotationZ: 270, rotationY: 180 },
+  8: { rotationX: 270, rotationZ: 270, rotationY: 180 },
+  2: { rotationX: 270, rotationZ: 90, rotationY: 180 },
+  11: { rotationX: 270, rotationZ: 90, rotationY: 180 },
+  21: { rotationX: 270, rotationZ: 90, rotationY: 180 },
+  24: { rotationX: 270, rotationZ: 90, rotationY: 180 },
+  18: { rotationX: 270, rotationZ: 270, rotationY: 180 },
+  27: { rotationX: 270, rotationZ: 270, rotationY: 180 },
+  28: { rotationX: 180, rotationZ: 0, rotationY: 0 }
 };
 
 let showField = true;
@@ -45,14 +45,22 @@ if (!app) {
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xffffff);
 
-const camera = new THREE.PerspectiveCamera(
+const mainCamera = new THREE.PerspectiveCamera(
   60,
   window.innerWidth / window.innerHeight,
   0.05,
   500
 );
-camera.position.set(10, 8, 10);
-camera.lookAt(0, 0, 0);
+mainCamera.position.set(0, 0, 20);
+mainCamera.lookAt(0, 0, 0);
+
+const povCamera = new THREE.PerspectiveCamera(
+  60,
+  window.innerWidth / window.innerHeight,
+  0.05,
+  500
+);
+let povCameraBaseFov = povCamera.fov;
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
@@ -79,6 +87,64 @@ hud.style.borderRadius = "8px";
 hud.style.pointerEvents = "none";
 hud.style.whiteSpace = "pre";
 app.appendChild(hud);
+
+const offsetPanel = document.createElement("div");
+offsetPanel.style.position = "absolute";
+offsetPanel.style.top = "12px";
+offsetPanel.style.right = "12px";
+offsetPanel.style.padding = "10px 12px";
+offsetPanel.style.background = "rgba(8, 12, 16, 0.72)";
+offsetPanel.style.color = "#f8fafc";
+offsetPanel.style.fontFamily = "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace";
+offsetPanel.style.fontSize = "12px";
+offsetPanel.style.lineHeight = "1.4";
+offsetPanel.style.borderRadius = "8px";
+offsetPanel.style.display = "grid";
+offsetPanel.style.gap = "8px";
+offsetPanel.style.minWidth = "200px";
+offsetPanel.style.pointerEvents = "auto";
+app.appendChild(offsetPanel);
+
+const offsetControls = [];
+let offsetLocked = true;
+
+const offsetHeader = document.createElement("div");
+offsetHeader.style.display = "flex";
+offsetHeader.style.alignItems = "center";
+offsetHeader.style.justifyContent = "space-between";
+offsetHeader.style.gap = "8px";
+
+const offsetTitle = document.createElement("div");
+offsetTitle.textContent = "Offsets";
+offsetTitle.style.fontWeight = "600";
+
+const offsetLockButton = document.createElement("button");
+offsetLockButton.type = "button";
+offsetLockButton.style.cursor = "pointer";
+offsetLockButton.style.background = "rgba(255, 255, 255, 0.08)";
+offsetLockButton.style.border = "1px solid rgba(255, 255, 255, 0.15)";
+offsetLockButton.style.color = "inherit";
+offsetLockButton.style.borderRadius = "6px";
+offsetLockButton.style.padding = "4px 8px";
+offsetLockButton.style.fontFamily =
+  "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace";
+offsetLockButton.style.fontSize = "11px";
+
+function updateOffsetLockUi() {
+  offsetLockButton.textContent = offsetLocked ? "Locked" : "Unlocked";
+  offsetControls.forEach((control) => {
+    control.disabled = offsetLocked;
+  });
+}
+
+offsetLockButton.addEventListener("click", () => {
+  offsetLocked = !offsetLocked;
+  updateOffsetLockUi();
+});
+
+offsetHeader.appendChild(offsetTitle);
+offsetHeader.appendChild(offsetLockButton);
+offsetPanel.appendChild(offsetHeader);
 
 const pmremGenerator = new THREE.PMREMGenerator(renderer);
 scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
@@ -114,27 +180,9 @@ scene.add(configGroup);
 const clock = new THREE.Clock();
 let robot = null;
 let robotVisual = null;
+let robotVisualBaseRotation = null;
 let fieldModel = null;
 const robotShaderMaterials = [];
-
-const followState = {
-  yaw: Math.PI * 0.25,
-  pitch: Math.PI / 6,
-  distance: 6,
-  minDistance: 2,
-  maxDistance: 30,
-  minPitch: 0.15,
-  maxPitch: Math.PI / 2 - 0.1,
-};
-
-const cameraModes = {
-  follow: "follow",
-  pov: "pov",
-};
-
-const cameraState = {
-  mode: cameraModes.pov,
-};
 
 const autoDriveState = {
   enabled: false,
@@ -168,17 +216,12 @@ const povLookState = {
 };
 const povYawQuat = new THREE.Quaternion();
 const povPitchQuat = new THREE.Quaternion();
+const povOffsetYawQuat = new THREE.Quaternion();
+const povOffsetPitchQuat = new THREE.Quaternion();
+const povOffsetRollQuat = new THREE.Quaternion();
 const povYawAxis = new THREE.Vector3(0, 0, 1);
 const povPitchAxis = new THREE.Vector3(1, 0, 0);
-
-const followTarget = new THREE.Vector3();
-const followTargetSmooth = new THREE.Vector3();
-const desiredCameraPos = new THREE.Vector3();
-const cameraOffset = new THREE.Vector3();
-let hasFollowTarget = false;
-
-const moveVector = new THREE.Vector2();
-const adjustedMove = new THREE.Vector2();
+const povRollAxis = new THREE.Vector3(0, 1, 0);
 
 const robotMotion = {
   speed: 2,
@@ -189,6 +232,67 @@ const robotMotion = {
 
 const driveSpeedScale = 3.0;
 let robotHeadingOffset = 0;
+const offsetState = {
+  yawDeg: 90,
+  pitchDeg: 90,
+  rollDeg: 0,
+};
+const robotOffsetState = {
+  yawDeg: 90,
+  pitchDeg: -90,
+  rollDeg: 0,
+};
+
+function createOffsetSlider(labelText, min, max, step, initialValue, onChange) {
+  const container = document.createElement("div");
+  container.style.display = "grid";
+  container.style.gap = "4px";
+
+  const label = document.createElement("label");
+  label.style.display = "flex";
+  label.style.justifyContent = "space-between";
+  label.style.alignItems = "center";
+  label.style.gap = "8px";
+  label.style.fontSize = "12px";
+  label.textContent = labelText;
+
+  const value = document.createElement("span");
+  value.textContent = `${initialValue}°`;
+  label.appendChild(value);
+
+  const input = document.createElement("input");
+  input.type = "range";
+  input.min = String(min);
+  input.max = String(max);
+  input.step = String(step);
+  input.value = String(initialValue);
+  input.style.width = "100%";
+  offsetControls.push(input);
+
+  input.addEventListener("input", () => {
+    const nextValue = Number(input.value);
+    value.textContent = `${nextValue}°`;
+    onChange(nextValue);
+  });
+
+  container.appendChild(label);
+  container.appendChild(input);
+  offsetPanel.appendChild(container);
+}
+
+function applyRobotVisualOffset() {
+  if (!robotVisual || !robotVisualBaseRotation) {
+    return;
+  }
+  const yawOffset = THREE.MathUtils.degToRad(robotOffsetState.yawDeg);
+  const pitchOffset = THREE.MathUtils.degToRad(robotOffsetState.pitchDeg);
+  const rollOffset = THREE.MathUtils.degToRad(robotOffsetState.rollDeg);
+  robotVisual.rotation.set(
+    robotVisualBaseRotation.x + pitchOffset,
+    robotVisualBaseRotation.y + yawOffset,
+    robotVisualBaseRotation.z + rollOffset
+  );
+}
 
 const physicsState = {
   world: null,
@@ -243,17 +347,15 @@ function applyRotations(object3d, rotations) {
 }
 
 function updateHud() {
-  const viewLabel = cameraState.mode === cameraModes.pov ? "Robot POV" : "Follow";
   const autoLabel = autoDriveState.enabled ? "ON" : "OFF";
   const outputLabel = captureState.directoryHandle ? "dir set" : "dir not set";
   const savedLabel = captureState.lastSaved ? `last=${captureState.lastSaved}` : "ready";
   hud.textContent =
-    `View: ${viewLabel}\n` +
     `Auto-drive: ${autoLabel}\n` +
     `Capture: ${outputLabel}, ${savedLabel}\n` +
-    "Keys: V=view M=drive O=output P=photo C=center H=field\n" +
+    "Keys: M=drive O=output P=photo C=center H=field\n" +
     "Move: W/S forward/back A/D turn\n" +
-    "Mouse: drag to look (POV) / orbit (follow)";
+    "Mouse: drag to look (POV)";
 }
 
 function createTagMaterial(id) {
@@ -603,8 +705,9 @@ function configureRobotCamera(robotConfig) {
   robotCameraState.ready = true;
 
   if (typeof cameraConfig.fov === "number") {
-    camera.fov = cameraConfig.fov;
-    camera.updateProjectionMatrix();
+    povCamera.fov = cameraConfig.fov;
+    povCamera.updateProjectionMatrix();
+    povCameraBaseFov = povCamera.fov;
   }
 
   if (Array.isArray(cameraConfig.resolution) && cameraConfig.resolution.length === 2) {
@@ -614,20 +717,36 @@ function configureRobotCamera(robotConfig) {
 }
 
 function updateRobotCamera() {
-  if (cameraState.mode !== cameraModes.pov || !robotCameraState.ready) {
-    return false;
+  if (!robotCameraState.ready) {
+    return;
   }
   robotCameraState.rig.updateWorldMatrix(true, false);
-  robotCameraState.rig.getWorldPosition(camera.position);
+  robotCameraState.rig.getWorldPosition(povCamera.position);
   robotCameraState.rig.getWorldQuaternion(tempQuat);
-  camera.quaternion.copy(tempQuat);
+  povCamera.quaternion.copy(tempQuat);
+  if (offsetState.yawDeg || offsetState.pitchDeg || offsetState.rollDeg) {
+    povOffsetYawQuat.setFromAxisAngle(
+      povYawAxis,
+      THREE.MathUtils.degToRad(offsetState.yawDeg)
+    );
+    povOffsetPitchQuat.setFromAxisAngle(
+      povPitchAxis,
+      THREE.MathUtils.degToRad(offsetState.pitchDeg)
+    );
+    povOffsetRollQuat.setFromAxisAngle(
+      povRollAxis,
+      THREE.MathUtils.degToRad(offsetState.rollDeg)
+    );
+    povCamera.quaternion.multiply(povOffsetYawQuat);
+    povCamera.quaternion.multiply(povOffsetPitchQuat);
+    povCamera.quaternion.multiply(povOffsetRollQuat);
+  }
   if (povLookState.yaw !== 0 || povLookState.pitch !== 0) {
     povYawQuat.setFromAxisAngle(povYawAxis, povLookState.yaw);
     povPitchQuat.setFromAxisAngle(povPitchAxis, povLookState.pitch);
-    camera.quaternion.multiply(povYawQuat);
-    camera.quaternion.multiply(povPitchQuat);
+    povCamera.quaternion.multiply(povYawQuat);
+    povCamera.quaternion.multiply(povPitchQuat);
   }
-  return true;
 }
 
 function setAutoDriveEnabled(enabled) {
@@ -638,15 +757,11 @@ function setAutoDriveEnabled(enabled) {
   updateHud();
 }
 
-function toggleCameraMode() {
-  cameraState.mode =
-    cameraState.mode === cameraModes.pov ? cameraModes.follow : cameraModes.pov;
-  updateHud();
-}
-
 function resetPovLook() {
   povLookState.yaw = 0;
   povLookState.pitch = 0;
+  povCamera.fov = povCameraBaseFov;
+  povCamera.updateProjectionMatrix();
 }
 
 function toggleAutoDrive() {
@@ -676,17 +791,17 @@ function renderCaptureBlob() {
   const height = captureState.height || renderer.domElement.height;
   ensureCaptureTarget(width, height);
 
-  const prevAspect = camera.aspect;
-  camera.aspect = width / height;
-  camera.updateProjectionMatrix();
+  const prevAspect = povCamera.aspect;
+  povCamera.aspect = width / height;
+  povCamera.updateProjectionMatrix();
 
   renderer.setRenderTarget(captureState.target);
-  renderer.render(scene, camera);
+  renderer.render(scene, povCamera);
   renderer.readRenderTargetPixels(captureState.target, 0, 0, width, height, captureState.buffer);
   renderer.setRenderTarget(null);
 
-  camera.aspect = prevAspect;
-  camera.updateProjectionMatrix();
+  povCamera.aspect = prevAspect;
+  povCamera.updateProjectionMatrix();
 
   if (!captureState.canvas) {
     captureState.canvas = document.createElement("canvas");
@@ -938,7 +1053,10 @@ function updateRobot(deltaSeconds) {
 
   if (autoDriveState.enabled) {
     robot.rotation.z = autoDriveState.heading;
-    const heading = robot.rotation.z + robotHeadingOffset;
+    const heading =
+      robot.rotation.z +
+      robotHeadingOffset +
+      THREE.MathUtils.degToRad(robotOffsetState.yawDeg);
     const dirX = Math.sin(heading);
     const dirY = -Math.cos(heading);
     const driveSpeed = robotMotion.speed * driveSpeedScale;
@@ -959,15 +1077,18 @@ function updateRobot(deltaSeconds) {
   // Handle movement (forward/backward)
   let moveDir = 0;
   if (keyState.KeyW) {
-    moveDir = 1; // forward
+    moveDir = -1; // backward
   }
   if (keyState.KeyS) {
-    moveDir = -1; // backward
+    moveDir = 1; // forward
   }
 
   if (moveDir !== 0) {
     // Move in the direction robot is facing (Z axis rotation)
-    const heading = robot.rotation.z + robotHeadingOffset;
+    const heading =
+      robot.rotation.z +
+      robotHeadingOffset +
+      THREE.MathUtils.degToRad(robotOffsetState.yawDeg);
     const dirX = Math.sin(heading);
     const dirY = -Math.cos(heading);
     const driveSpeed = robotMotion.speed * driveSpeedScale;
@@ -978,30 +1099,6 @@ function updateRobot(deltaSeconds) {
     physicsState.robotBody.velocity.x = 0;
     physicsState.robotBody.velocity.y = 0;
   }
-}
-
-function updateFollowCamera() {
-  if (!robot) {
-    return;
-  }
-
-  robot.getWorldPosition(followTarget);
-  if (!hasFollowTarget) {
-    followTargetSmooth.copy(followTarget);
-    hasFollowTarget = true;
-  } else {
-    followTargetSmooth.lerp(followTarget, 0.2);
-  }
-
-  const polar = Math.PI / 2 - followState.pitch;
-  cameraOffset.setFromSphericalCoords(
-    followState.distance,
-    polar,
-    followState.yaw
-  );
-  desiredCameraPos.copy(followTargetSmooth).add(cameraOffset);
-  camera.position.lerp(desiredCameraPos, 0.12);
-  camera.lookAt(followTargetSmooth);
 }
 
 function setupCameraControls() {
@@ -1032,21 +1129,12 @@ function setupCameraControls() {
     lastX = event.clientX;
     lastY = event.clientY;
 
-    if (cameraState.mode === cameraModes.pov) {
-      povLookState.yaw -= dx * 0.005;
-      povLookState.pitch = THREE.MathUtils.clamp(
-        povLookState.pitch + dy * 0.005,
-        povLookState.minPitch,
-        povLookState.maxPitch
-      );
-    } else {
-      followState.yaw -= dx * 0.005;
-      followState.pitch = THREE.MathUtils.clamp(
-        followState.pitch + dy * 0.005,
-        followState.minPitch,
-        followState.maxPitch
-      );
-    }
+    povLookState.yaw -= dx * 0.005;
+    povLookState.pitch = THREE.MathUtils.clamp(
+      povLookState.pitch + dy * 0.005,
+      povLookState.minPitch,
+      povLookState.maxPitch
+    );
   });
 
   renderer.domElement.addEventListener("pointerup", (event) => {
@@ -1077,16 +1165,8 @@ function setupCameraControls() {
     "wheel",
     (event) => {
       event.preventDefault();
-      if (cameraState.mode === cameraModes.pov) {
-        camera.fov = THREE.MathUtils.clamp(camera.fov + event.deltaY * 0.03, 35, 110);
-        camera.updateProjectionMatrix();
-      } else {
-        followState.distance = THREE.MathUtils.clamp(
-          followState.distance + event.deltaY * 0.01,
-          followState.minDistance,
-          followState.maxDistance
-        );
-      }
+      povCamera.fov = THREE.MathUtils.clamp(povCamera.fov + event.deltaY * 0.03, 35, 110);
+      povCamera.updateProjectionMatrix();
     },
     { passive: false }
   );
@@ -1107,11 +1187,6 @@ function setupKeyboardControls() {
       allAxisHelpers.forEach(helper => {
         helper.visible = showDebugAxes;
       });
-      event.preventDefault();
-      return;
-    }
-    if (event.code === "KeyV") {
-      toggleCameraMode();
       event.preventDefault();
       return;
     }
@@ -1210,10 +1285,10 @@ function logModelStats(model, name) {
 
 function frameCamera(widthMeters, heightMeters) {
   const maxDim = Math.max(widthMeters, heightMeters);
-  camera.position.set(maxDim * 0.6, maxDim * 0.45, maxDim * 0.6);
-  camera.lookAt(0, 0, 0);
-  camera.far = maxDim * 6;
-  camera.updateProjectionMatrix();
+  mainCamera.position.set(0, maxDim * 0.85, maxDim * 1.1);
+  mainCamera.lookAt(0, 0, 0);
+  mainCamera.far = maxDim * 6;
+  mainCamera.updateProjectionMatrix();
 }
 
 async function init() {
@@ -1225,9 +1300,6 @@ async function init() {
   const robotSize = inchesToMeters(24);
 
   frameCamera(widthMeters, heightMeters);
-  followState.distance = Math.max(4, maxDim * 0.35);
-  followState.minDistance = Math.max(1.5, maxDim * 0.12);
-  followState.maxDistance = Math.max(followState.distance * 1.5, maxDim * 1.1);
   robotMotion.speed = Math.max(1.2, maxDim * 0.14);
   robotMotion.height = robotSize / 2;
   robotMotion.halfSize = robotSize / 2;
@@ -1260,10 +1332,12 @@ async function init() {
     robotVisual.rotation.set(0, 0, 0);
   }
   applyRotations(robotVisual, robotConfig.rotations);
+  robotVisualBaseRotation = robotVisual.rotation.clone();
   robot.add(robotVisual);
   updateRobotHeadingOffset();
   applyRobotGroundOffset(robotVisual, robotMotion.halfSize, robot);
   configureRobotCamera(robotConfig);
+  applyRobotVisualOffset();
 
   robot.position.set(0, 0, robotMotion.halfSize);
   autoDriveState.heading = robot.rotation.z;
@@ -1330,8 +1404,10 @@ async function init() {
 }
 
 function onResize() {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
+  mainCamera.aspect = window.innerWidth / window.innerHeight;
+  mainCamera.updateProjectionMatrix();
+  povCamera.aspect = window.innerWidth / window.innerHeight;
+  povCamera.updateProjectionMatrix();
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
   renderer.setSize(window.innerWidth, window.innerHeight);
 }
@@ -1340,6 +1416,25 @@ window.addEventListener("resize", onResize);
 
 setupCameraControls();
 setupKeyboardControls();
+
+createOffsetSlider("Camera yaw", -180, 180, 1, 90, (value) => {
+  offsetState.yawDeg = value;
+});
+createOffsetSlider("Pitch offset", -90, 90, 1, 90, (value) => {
+  offsetState.pitchDeg = value;
+});
+createOffsetSlider("Roll offset", -180, 180, 1, 0, (value) => {
+  offsetState.rollDeg = value;
+});
+createOffsetSlider("Robot yaw", -180, 180, 1, 90, (value) => {
+  robotOffsetState.yawDeg = value;
+  applyRobotVisualOffset();
+});
+createOffsetSlider("Robot roll", -180, 180, 1, 0, (value) => {
+  robotOffsetState.rollDeg = value;
+  applyRobotVisualOffset();
+});
+updateOffsetLockUi();
 
 init().catch((error) => {
   console.error("Failed to initialize scene:", error);
@@ -1360,16 +1455,26 @@ function animate() {
 
   updateRobot(deltaSeconds);
   stepPhysics(deltaSeconds);
-  if (!updateRobotCamera()) {
-    updateFollowCamera();
-  }
+  updateRobotCamera();
   robotShaderMaterials.forEach((material) => {
     material.uniforms.uTime.value = elapsedSeconds;
     material.uniforms.uLightDir.value
       .copy(directionalLight.position)
       .normalize();
   });
-  renderer.render(scene, camera);
+  renderer.setScissorTest(true);
+  renderer.setViewport(0, 0, window.innerWidth, window.innerHeight);
+  renderer.setScissor(0, 0, window.innerWidth, window.innerHeight);
+  renderer.render(scene, mainCamera);
+
+  const insetSize = Math.round(Math.min(window.innerWidth, window.innerHeight) * 0.32);
+  const insetX = window.innerWidth - insetSize - 12;
+  const insetY = 12;
+  renderer.clearDepth();
+  renderer.setViewport(insetX, insetY, insetSize, insetSize);
+  renderer.setScissor(insetX, insetY, insetSize, insetSize);
+  renderer.render(scene, povCamera);
+  renderer.setScissorTest(false);
   updateHud();
 }
 
