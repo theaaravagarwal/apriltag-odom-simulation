@@ -102,8 +102,47 @@ offsetPanel.style.borderRadius = "8px";
 offsetPanel.style.display = "grid";
 offsetPanel.style.gap = "8px";
 offsetPanel.style.minWidth = "200px";
-offsetPanel.style.pointerEvents = "auto";
+offsetPanel.style.pointerEvents = "auto"
 app.appendChild(offsetPanel);
+
+const visionPanel = document.createElement("div");
+visionPanel.style.position = "absolute";
+visionPanel.style.left = "250px";
+visionPanel.style.bottom = "12px";
+visionPanel.style.transform = "translateX(-150px)";
+visionPanel.style.padding = "2px";
+visionPanel.style.background = "rgba(8, 12, 16, 0.9)";
+visionPanel.style.border = "0px solid rgba(255, 255, 255, 0.12)";
+visionPanel.style.borderRadius = "10px";
+visionPanel.style.boxShadow = "0 10px 30px rgba(0, 0, 0, 0.35)";
+visionPanel.style.pointerEvents = "none";
+visionPanel.style.display = "grid";
+visionPanel.style.gap = "6px";
+app.appendChild(visionPanel);
+
+const visionLabel = document.createElement("div");
+visionLabel.textContent = "POV Stream";
+visionLabel.style.fontFamily =
+  "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace";
+visionLabel.style.fontSize = "11px";
+visionLabel.style.color = "rgba(248, 250, 252, 0.9)";
+visionLabel.style.letterSpacing = "0.04em";
+visionLabel.style.textTransform = "uppercase";
+visionPanel.appendChild(visionLabel);
+
+const detectionStatusIndicator = document.createElement("div");
+detectionStatusIndicator.textContent = "Status: Waiting";
+detectionStatusIndicator.style.fontFamily = "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace";
+detectionStatusIndicator.style.fontSize = "10px";
+detectionStatusIndicator.style.color = "#94a3b8";
+detectionStatusIndicator.id = "detection-status";
+visionPanel.appendChild(detectionStatusIndicator);
+
+const visionCanvas = document.createElement("canvas");
+visionCanvas.style.display = "block";
+visionCanvas.style.borderRadius = "6px";
+visionCanvas.style.background = "#0b1118";
+visionPanel.appendChild(visionCanvas);
 
 const offsetControls = [];
 let offsetLocked = true;
@@ -205,6 +244,33 @@ const captureState = {
   buffer: null,
   canvas: null,
   lastSaved: "",
+};
+
+const visionState = {
+  enabled: true,
+  width: 480,
+  height: 360,
+  target: null,
+  buffer: null,
+  imageData: null,
+  ctx: visionCanvas.getContext("2d"),
+};
+visionCanvas.width = visionState.width;
+visionCanvas.height = visionState.height;
+visionCanvas.style.width = `${visionState.width}px`;
+visionCanvas.style.height = `${visionState.height}px`;
+
+const detectionState = {
+  detections: [],
+  imageSize: null,
+  lastUpdated: 0,
+  error: null,
+  autoCaptureEnabled: false,
+  autoCaptureInterval: null,
+  autoCaptureIntervalMs: 33.333, // 1 second between captures
+  lastDetectionFetch: null,
+  fetchInFlight: false,
+  detectionStatus: "waiting", // "waiting", "success", "error"
 };
 
 const tempQuat = new THREE.Quaternion();
@@ -348,12 +414,15 @@ function applyRotations(object3d, rotations) {
 
 function updateHud() {
   const autoLabel = autoDriveState.enabled ? "ON" : "OFF";
+  const autoCaptureLabel = detectionState.autoCaptureEnabled ? "AUTO" : "MANUAL";
+  const detectionStatusLabel = detectionState.detectionStatus.toUpperCase();
   const outputLabel = captureState.directoryHandle ? "dir set" : "dir not set";
   const savedLabel = captureState.lastSaved ? `last=${captureState.lastSaved}` : "ready";
   hud.textContent =
     `Auto-drive: ${autoLabel}\n` +
-    `Capture: ${outputLabel}, ${savedLabel}\n` +
-    "Keys: M=drive O=output P=photo C=center H=field\n" +
+    `Capture: ${autoCaptureLabel}, ${outputLabel}, ${savedLabel}\n` +
+    `Detections: ${detectionStatusLabel} (${detectionState.detections.length})\n` +
+    "Keys: M=drive O=output P=photo K=auto-capture C=center H=field\n" +
     "Move: W/S forward/back A/D turn\n" +
     "Mouse: drag to look (POV)";
 }
@@ -713,6 +782,9 @@ function configureRobotCamera(robotConfig) {
   if (Array.isArray(cameraConfig.resolution) && cameraConfig.resolution.length === 2) {
     captureState.width = cameraConfig.resolution[0];
     captureState.height = cameraConfig.resolution[1];
+    const targetWidth = Math.max(240, Math.round(cameraConfig.resolution[0] * 0.4));
+    const targetHeight = Math.max(180, Math.round(cameraConfig.resolution[1] * 0.4));
+    ensureVisionTarget(targetWidth, targetHeight);
   }
 }
 
@@ -747,6 +819,9 @@ function updateRobotCamera() {
     povCamera.quaternion.multiply(povYawQuat);
     povCamera.quaternion.multiply(povPitchQuat);
   }
+  // Rotate camera 180 degrees around Y-axis to face the front of the robot (direction of movement)
+  const cameraFlipQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
+  povCamera.quaternion.multiply(cameraFlipQuat);
 }
 
 function setAutoDriveEnabled(enabled) {
@@ -827,6 +902,209 @@ function renderCaptureBlob() {
   });
 }
 
+function ensureVisionTarget(width, height) {
+  if (visionState.target && visionState.width === width && visionState.height === height) {
+    return;
+  }
+  if (visionState.target) {
+    visionState.target.dispose();
+  }
+  visionState.width = width;
+  visionState.height = height;
+  visionCanvas.width = width;
+  visionCanvas.height = height;
+  visionCanvas.style.width = `${width}px`;
+  visionCanvas.style.height = `${height}px`;
+  visionState.target = new THREE.WebGLRenderTarget(width, height, {
+    depthBuffer: true,
+    stencilBuffer: false,
+  });
+  visionState.buffer = new Uint8Array(width * height * 4);
+  visionState.imageData = visionState.ctx.createImageData(width, height);
+}
+
+function drawDetectionOutlines(ctx, width, height) {
+  if (!detectionState.detections.length) {
+    return;
+  }
+
+  const imageSize = detectionState.imageSize;
+  const scaleX = imageSize ? width / imageSize[0] : 1;
+  const scaleY = imageSize ? height / imageSize[1] : 1;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, width, height);
+  ctx.clip();
+
+  ctx.font = "12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace";
+
+  for (const det of detectionState.detections) {
+    const corners = det.corners;
+    if (!Array.isArray(corners) || corners.length !== 4) {
+      continue;
+    }
+
+    // Determine color based on detection quality
+    let strokeColor = "rgba(0, 255, 120, 0.9)"; // Default green for good detection
+    if (det.hamming > 0) {
+      strokeColor = "rgba(255, 165, 0, 0.9)"; // Orange for hamming errors
+    } else if (det.decision_margin < 50) {
+      strokeColor = "rgba(255, 255, 0, 0.9)"; // Yellow for low confidence
+    }
+
+    const pts = corners.map(([x, y]) => [x * scaleX, y * scaleY]);
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    ctx.lineTo(pts[1][0], pts[1][1]);
+    ctx.lineTo(pts[2][0], pts[2][1]);
+    ctx.lineTo(pts[3][0], pts[3][1]);
+    ctx.closePath();
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    const cx =
+      (pts[0][0] + pts[1][0] + pts[2][0] + pts[3][0]) / 4;
+    const cy =
+      (pts[0][1] + pts[1][1] + pts[2][1] + pts[3][1]) / 4;
+    ctx.fillStyle = "rgba(0, 0, 0, 0.4)";
+    ctx.fillRect(cx - 12, cy - 12, 24, 16);
+    ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
+    ctx.fillText(String(det.id), cx - 8, cy);
+  }
+  ctx.restore();
+}
+
+// Function to fetch latest detections from JSON file with cache busting
+async function fetchLatestDetections() {
+  try {
+    // Try multiple possible paths for the JSON file
+    const paths = [
+      '../tagoutput1/latest_detections.json',
+      './tagoutput1/latest_detections.json',
+      'tagoutput1/latest_detections.json',
+      '/tagoutput1/latest_detections.json'
+    ];
+
+    for (const path of paths) {
+      try {
+        // Add cache-busting parameter
+        const cacheBustUrl = `${path}?t=${Date.now()}`;
+        const response = await fetch(cacheBustUrl, {
+          cache: 'no-cache',
+          headers: {
+            'Cache-Control': 'no-cache'
+          }
+        });
+        if (response.ok) {
+          const data = await response.json();
+          return data;
+        }
+      } catch (fetchError) {
+        // Try next path
+        continue;
+      }
+    }
+
+    // If all paths failed, return null
+    return null;
+  } catch (error) {
+    console.warn("Error fetching detections:", error);
+    return null;
+  }
+}
+
+// Function to periodically update detection state
+async function updateDetectionState() {
+  if (detectionState.fetchInFlight) {
+    return;
+  }
+  detectionState.fetchInFlight = true;
+  detectionState.lastDetectionFetch = Date.now();
+  try {
+    const data = await fetchLatestDetections();
+
+    if (data && data.detections) {
+      detectionState.detections = data.detections;
+      detectionState.imageSize = data.image_size || [960, 720]; // Default size
+      detectionState.lastUpdated = Date.now();
+      detectionState.error = null;
+      detectionState.detectionStatus = "success";
+    } else {
+      detectionState.detections = [];
+      detectionState.detectionStatus = "waiting";
+    }
+  } catch (error) {
+    detectionState.error = error.message;
+    detectionState.detectionStatus = "error";
+    console.warn("Error fetching detections:", error);
+  } finally {
+    detectionState.fetchInFlight = false;
+  }
+
+  // Update the status indicator in the UI
+  updateDetectionStatusUI();
+}
+
+// Function to update the detection status indicator in the UI
+function updateDetectionStatusUI() {
+  const statusElement = document.getElementById('detection-status');
+  if (statusElement) {
+    let statusText = `Status: ${detectionState.detectionStatus.toUpperCase()}`;
+    if (detectionState.detectionStatus === 'success') {
+      statusText += ` (${detectionState.detections.length} detections)`;
+    }
+    statusElement.textContent = statusText;
+
+    // Update color based on status
+    switch (detectionState.detectionStatus) {
+      case 'success':
+        statusElement.style.color = '#4ade80'; // Green for success
+        break;
+      case 'error':
+        statusElement.style.color = '#f87171'; // Red for error
+        break;
+      default:
+        statusElement.style.color = '#94a3b8'; // Gray for waiting
+    }
+  }
+}
+
+function updateVisionStream() {
+  if (!visionState.enabled) {
+    return;
+  }
+  const width = visionState.width;
+  const height = visionState.height;
+  ensureVisionTarget(width, height);
+
+  const prevAspect = povCamera.aspect;
+  povCamera.aspect = width / height;
+  povCamera.updateProjectionMatrix();
+
+  renderer.setRenderTarget(visionState.target);
+  renderer.render(scene, povCamera);
+  renderer.readRenderTargetPixels(visionState.target, 0, 0, width, height, visionState.buffer);
+  renderer.setRenderTarget(null);
+
+  povCamera.aspect = prevAspect;
+  povCamera.updateProjectionMatrix();
+
+  const imageData = visionState.imageData;
+  const rowBytes = width * 4;
+  for (let y = 0; y < height; y += 1) {
+    const srcStart = (height - 1 - y) * rowBytes;
+    const dstStart = y * rowBytes;
+    imageData.data.set(
+      visionState.buffer.subarray(srcStart, srcStart + rowBytes),
+      dstStart
+    );
+  }
+  visionState.ctx.putImageData(imageData, 0, 0);
+  drawDetectionOutlines(visionState.ctx, width, height);
+}
+
 function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -893,6 +1171,28 @@ async function captureFrame() {
     captureState.inProgress = false;
     updateHud();
   }
+}
+
+function toggleAutoCapture() {
+  if (detectionState.autoCaptureEnabled) {
+    // Disable auto capture
+    if (detectionState.autoCaptureInterval) {
+      clearInterval(detectionState.autoCaptureInterval);
+      detectionState.autoCaptureInterval = null;
+    }
+    detectionState.autoCaptureEnabled = false;
+    console.log("Auto capture disabled");
+  } else {
+    // Enable auto capture
+    detectionState.autoCaptureEnabled = true;
+    detectionState.autoCaptureInterval = setInterval(() => {
+      if (!captureState.inProgress) {
+        captureFrame();
+      }
+    }, detectionState.autoCaptureIntervalMs);
+    console.log("Auto capture enabled");
+  }
+  updateHud();
 }
 
 function initPhysicsWorld(widthMeters, heightMeters) {
@@ -1056,7 +1356,8 @@ function updateRobot(deltaSeconds) {
     const heading =
       robot.rotation.z +
       robotHeadingOffset +
-      THREE.MathUtils.degToRad(robotOffsetState.yawDeg);
+      THREE.MathUtils.degToRad(robotOffsetState.yawDeg) +
+      Math.PI; // Add 180 degree offset to fix direction
     const dirX = Math.sin(heading);
     const dirY = -Math.cos(heading);
     const driveSpeed = robotMotion.speed * driveSpeedScale;
@@ -1077,10 +1378,10 @@ function updateRobot(deltaSeconds) {
   // Handle movement (forward/backward)
   let moveDir = 0;
   if (keyState.KeyW) {
-    moveDir = -1; // backward
+    moveDir = -1; // backward (swap to fix direction)
   }
   if (keyState.KeyS) {
-    moveDir = 1; // forward
+    moveDir = 1; // forward (swap to fix direction)
   }
 
   if (moveDir !== 0) {
@@ -1088,7 +1389,8 @@ function updateRobot(deltaSeconds) {
     const heading =
       robot.rotation.z +
       robotHeadingOffset +
-      THREE.MathUtils.degToRad(robotOffsetState.yawDeg);
+      THREE.MathUtils.degToRad(robotOffsetState.yawDeg) +
+      Math.PI; // Add 180 degree offset to fix direction
     const dirX = Math.sin(heading);
     const dirY = -Math.cos(heading);
     const driveSpeed = robotMotion.speed * driveSpeedScale;
@@ -1207,6 +1509,12 @@ function setupKeyboardControls() {
     }
     if (event.code === "KeyC") {
       resetPovLook();
+      event.preventDefault();
+      return;
+    }
+    if (event.code === "KeyK") {
+      // Toggle auto capture on 'K' key
+      toggleAutoCapture();
       event.preventDefault();
       return;
     }
@@ -1453,6 +1761,14 @@ function animate() {
     lastTime = elapsedSeconds;
   }
 
+  // Periodically update detection state (every 500ms)
+  if (
+    Date.now() - (detectionState.lastDetectionFetch || 0) > 500 &&
+    !detectionState.fetchInFlight
+  ) {
+    updateDetectionState();
+  }
+
   updateRobot(deltaSeconds);
   stepPhysics(deltaSeconds);
   updateRobotCamera();
@@ -1462,19 +1778,9 @@ function animate() {
       .copy(directionalLight.position)
       .normalize();
   });
-  renderer.setScissorTest(true);
   renderer.setViewport(0, 0, window.innerWidth, window.innerHeight);
-  renderer.setScissor(0, 0, window.innerWidth, window.innerHeight);
   renderer.render(scene, mainCamera);
-
-  const insetSize = Math.round(Math.min(window.innerWidth, window.innerHeight) * 0.32);
-  const insetX = window.innerWidth - insetSize - 12;
-  const insetY = 12;
-  renderer.clearDepth();
-  renderer.setViewport(insetX, insetY, insetSize, insetSize);
-  renderer.setScissor(insetX, insetY, insetSize, insetSize);
-  renderer.render(scene, povCamera);
-  renderer.setScissorTest(false);
+  updateVisionStream();
   updateHud();
 }
 

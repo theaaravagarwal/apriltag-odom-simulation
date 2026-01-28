@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from "fs";
 import { resolve } from "path";
 
 const FIELD_CONFIG_PATH = resolve("field/config.json");
-const OUTPUT_PATH = resolve("rufiggaapriltags/tag_map_field.json");
+const OUTPUT_PATH = resolve("chiggapriltags/tag_map_field.json");
 
 const TAG_OVERRIDES = {
   "3-4": { rotationY: 180, rotationZ: 180 },
