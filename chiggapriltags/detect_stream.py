@@ -5,7 +5,12 @@ import time
 
 import numpy as np
 
-from tag_map_odometry import compute_camera_pose_from_map, load_tag_map
+from tag_map_odometry import (
+    build_tag_map_from_field_config,
+    compute_camera_pose_from_map,
+    load_tag_map,
+    load_tag_overrides,
+)
 
 
 def load_grayscale(path):
@@ -113,11 +118,6 @@ def compute_camera_intrinsics(width, height, camera_config, camera_index, fx, fy
                 focal = (width * 0.5) / np.tan(fov_rad * 0.5)
                 fx = fx if fx is not None else focal
                 fy = fy if fy is not None else focal
-            if cfg.get("resolution") and len(cfg["resolution"]) == 2:
-                res_w, res_h = cfg["resolution"]
-                if width != res_w or height != res_h:
-                    width = res_w
-                    height = res_h
             cx = cx if cx is not None else width / 2.0
             cy = cy if cy is not None else height / 2.0
             return fx, fy, cx, cy
@@ -260,6 +260,17 @@ def main(argv=None):
     parser.add_argument("--pattern", default="apriltag_frame_", help="Filename contains pattern")
     parser.add_argument("--field-config", default="field_config.json", help="Field config JSON")
     parser.add_argument("--tag-map", default="tag_map_field.json", help="Tag map JSON")
+    parser.add_argument(
+        "--tag-map-mode",
+        choices=("auto", "file"),
+        default="auto",
+        help="Build tag map from field config/overrides or load from file",
+    )
+    parser.add_argument(
+        "--tag-overrides",
+        default="../tag_overrides.json",
+        help="Path to tag overrides JSON for auto tag map",
+    )
     parser.add_argument("--camera-config", default="../robot/config.json", help="Robot camera config")
     parser.add_argument("--camera-index", type=int, default=0, help="Camera index in robot config")
     parser.add_argument("--family", default="tag36h11", help="Tag family")
@@ -276,6 +287,21 @@ def main(argv=None):
     parser.add_argument("--refine-edges", type=int, default=1, help="Refine edges (0/1)")
     parser.add_argument("--decode-sharpening", type=float, default=0.35, help="Decode sharpening")
     parser.add_argument("--min-margin", type=float, default=0.0, help="Min decision margin")
+    parser.add_argument("--max-hamming", type=int, default=0, help="Max allowed hamming distance")
+    parser.add_argument("--min-pose-tags", type=int, default=2, help="Min tag count to accept pose")
+    parser.add_argument(
+        "--pose-max-translation-dev",
+        type=float,
+        default=None,
+        help="Max translation deviation for pose inliers (meters)",
+    )
+    parser.add_argument(
+        "--pose-max-rotation-deg",
+        type=float,
+        default=None,
+        help="Max rotation deviation for pose inliers (degrees)",
+    )
+    parser.add_argument("--no-pose-robust", action="store_true", help="Disable robust pose fusion")
     parser.add_argument("--no-enhance", action="store_true", help="Disable CLAHE/unsharp")
     parser.add_argument("--clahe-clip", type=float, default=2.0, help="CLAHE clip limit")
     parser.add_argument("--clahe-grid", type=int, default=8, help="CLAHE grid size")
@@ -301,8 +327,15 @@ def main(argv=None):
         tag_size = 0.1651
 
     tag_map = None
+    if args.tag_map_mode == "auto":
+        overrides = load_tag_overrides(args.tag_overrides)
+        try:
+            tag_map = build_tag_map_from_field_config(field_config, overrides)
+        except Exception as exc:
+            print(f"Tag map auto-build failed: {exc}")
+
     tag_map_path = args.tag_map
-    if tag_map_path:
+    if tag_map is None and tag_map_path:
         if not os.path.isabs(tag_map_path):
             tag_map_path = os.path.join(os.path.dirname(__file__), tag_map_path)
         if os.path.exists(tag_map_path):
@@ -383,12 +416,23 @@ def main(argv=None):
 
                 fused_pose = None
                 if tag_map and det_dicts:
-                    fused = compute_camera_pose_from_map(det_dicts, tag_map)
+                    fused = compute_camera_pose_from_map(
+                        det_dicts,
+                        tag_map,
+                        min_margin=args.min_margin,
+                        max_hamming=args.max_hamming,
+                        min_inliers=args.min_pose_tags,
+                        robust=not args.no_pose_robust,
+                        max_translation_dev=args.pose_max_translation_dev,
+                        max_rotation_deg=args.pose_max_rotation_deg,
+                    )
                     if fused is not None:
                         fused_pose = {
                             "translation": np.asarray(fused["translation"], dtype=np.float64).tolist(),
                             "rotation": np.asarray(fused["rotation"], dtype=np.float64).tolist(),
                             "rpy_rad": rotation_to_rpy(fused["rotation"]),
+                            "inlier_ids": fused.get("inlier_ids"),
+                            "inlier_count": fused.get("inlier_count"),
                         }
 
                 frame = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)

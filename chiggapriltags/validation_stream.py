@@ -17,6 +17,8 @@ except ImportError:
     print("OpenCV and NumPy are required. Activate the virtual environment in chiggapriltags/env/")
     exit(1)
 
+from detect_stream import rotation_to_rpy
+
 
 class AprilTagValidator:
     def __init__(self, detections_path, field_config_path="field_config.json", tag_map_path="tag_map_field.json"):
@@ -246,6 +248,196 @@ class AprilTagValidator:
                 break
         
         cv2.destroyAllWindows()
+
+
+def _rotation_matrix_from_axis(axis, radians):
+    c = float(np.cos(radians))
+    s = float(np.sin(radians))
+    if axis == "x":
+        return np.array([[1, 0, 0], [0, c, -s], [0, s, c]], dtype=np.float64)
+    if axis == "y":
+        return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]], dtype=np.float64)
+    if axis == "z":
+        return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], dtype=np.float64)
+    return np.eye(3, dtype=np.float64)
+
+
+def rotation_matrix_from_rotations(rotations):
+    if not isinstance(rotations, list):
+        return np.eye(3, dtype=np.float64)
+    rot = np.eye(3, dtype=np.float64)
+    for entry in rotations:
+        if not isinstance(entry, dict):
+            continue
+        axis = entry.get("axis")
+        degrees = entry.get("degrees")
+        if axis not in {"x", "y", "z"} or degrees is None:
+            continue
+        radians = np.deg2rad(float(degrees))
+        rot = rot @ _rotation_matrix_from_axis(axis, radians)
+    return rot
+
+
+def _camera_pose_from_tag(det_rot, det_trans, map_entry):
+    cam_tag_rot = det_rot.T
+    cam_tag_trans = -cam_tag_rot @ det_trans
+    map_rot = np.asarray(map_entry["rotation"], dtype=np.float64)
+    map_trans = np.asarray(map_entry["translation"], dtype=np.float64).reshape(3)
+    cam_map_rot = map_rot @ cam_tag_rot
+    cam_map_trans = map_rot @ cam_tag_trans + map_trans
+    return cam_map_rot, cam_map_trans
+
+
+def compute_pose_error(det_dicts, tag_map, fused_pose):
+    if not det_dicts or not tag_map or fused_pose is None:
+        return None
+    fused_trans = np.asarray(fused_pose.get("translation"), dtype=np.float64).reshape(3)
+    inlier_ids = fused_pose.get("inlier_ids") if isinstance(fused_pose, dict) else None
+    inlier_set = set(inlier_ids) if inlier_ids else None
+    errors = []
+    for det in det_dicts:
+        if inlier_set is not None and det.get("id") not in inlier_set:
+            continue
+        pose = det.get("pose")
+        if not pose:
+            continue
+        map_entry = tag_map.get(det.get("id"))
+        if not map_entry:
+            continue
+        det_rot = np.asarray(pose.get("rotation"), dtype=np.float64)
+        det_trans = np.asarray(pose.get("translation"), dtype=np.float64).reshape(-1)
+        if det_rot.shape != (3, 3) or det_trans.shape[0] != 3:
+            continue
+        _, cam_trans = _camera_pose_from_tag(det_rot, det_trans, map_entry)
+        errors.append(float(np.linalg.norm(cam_trans - fused_trans)))
+    if not errors:
+        return None
+    rms = float(np.sqrt(np.mean(np.square(errors))))
+    return {"rms_translation_m": rms, "count": len(errors)}
+
+
+def compute_robot_pose_from_camera(fused_pose, camera_config, camera_index=0):
+    if fused_pose is None:
+        return None
+
+    cam_rot = np.asarray(fused_pose.get("rotation"), dtype=np.float64)
+    cam_trans = np.asarray(fused_pose.get("translation"), dtype=np.float64).reshape(3)
+    if cam_rot.shape != (3, 3):
+        return None
+
+    cam_cfg = None
+    if camera_config and isinstance(camera_config.get("cameras"), list):
+        cameras = camera_config["cameras"]
+        if 0 <= camera_index < len(cameras):
+            cam_cfg = cameras[camera_index]
+
+    if cam_cfg is None:
+        return {
+            "translation": cam_trans.tolist(),
+            "rotation": cam_rot.tolist(),
+            "rpy_rad": rotation_to_rpy(cam_rot),
+            "label": "camera_pose",
+        }
+
+    cam_offset = np.asarray(cam_cfg.get("position", [0, 0, 0]), dtype=np.float64).reshape(3)
+    cam_rot_rel = rotation_matrix_from_rotations(cam_cfg.get("rotations"))
+    robot_rot = cam_rot @ cam_rot_rel.T
+    robot_trans = cam_rot @ (-cam_rot_rel.T @ cam_offset) + cam_trans
+    return {
+        "translation": robot_trans.tolist(),
+        "rotation": robot_rot.tolist(),
+        "rpy_rad": rotation_to_rpy(robot_rot),
+        "label": "robot_pose",
+    }
+
+
+def compute_rotation_error_rad(rot_a, rot_b):
+    rot_a = np.asarray(rot_a, dtype=np.float64)
+    rot_b = np.asarray(rot_b, dtype=np.float64)
+    if rot_a.shape != (3, 3) or rot_b.shape != (3, 3):
+        return None
+    rot_err = rot_a.T @ rot_b
+    trace = float(np.trace(rot_err))
+    cos_theta = (trace - 1.0) / 2.0
+    cos_theta = float(np.clip(cos_theta, -1.0, 1.0))
+    return float(np.arccos(cos_theta))
+
+
+def compute_ground_truth_error(pred_pose, ground_truth_pose):
+    if not pred_pose or not ground_truth_pose:
+        return None
+    pred_trans = np.asarray(pred_pose.get("translation"), dtype=np.float64).reshape(3)
+    gt_trans = np.asarray(ground_truth_pose.get("translation"), dtype=np.float64).reshape(3)
+    delta = pred_trans - gt_trans
+    trans_err = float(np.linalg.norm(delta))
+    rot_err = None
+    pred_rpy = None
+    gt_rpy = None
+    yaw_err = None
+    if pred_pose.get("rotation") is not None and ground_truth_pose.get("rotation") is not None:
+        pred_rpy = rotation_to_rpy(pred_pose["rotation"])
+        gt_rpy = rotation_to_rpy(ground_truth_pose["rotation"])
+        rot_err = compute_rotation_error_rad(pred_pose["rotation"], ground_truth_pose["rotation"])
+        if pred_rpy is not None and gt_rpy is not None:
+            yaw_err = _wrap_angle_rad(pred_rpy[2] - gt_rpy[2])
+    return {
+        "translation_m": trans_err,
+        "delta_m": delta,
+        "rotation_rad": rot_err,
+        "pred_rpy_rad": pred_rpy,
+        "gt_rpy_rad": gt_rpy,
+        "yaw_error_rad": yaw_err,
+    }
+
+
+def _wrap_angle_rad(angle):
+    return float((angle + np.pi) % (2.0 * np.pi) - np.pi)
+
+
+def _rad_to_deg(value):
+    return float(np.rad2deg(value))
+
+
+def _vec3_to_list(value):
+    return np.asarray(value, dtype=np.float64).reshape(3).tolist()
+
+
+def format_pose_line(robot_pose, tag_error=None, ground_truth_error=None, inlier_ids=None):
+    if not robot_pose:
+        return "pose: none"
+    meters_to_feet = 3.28084
+    trans_m = np.asarray(robot_pose.get("translation"), dtype=np.float64)
+    trans = (trans_m * meters_to_feet).round(3).tolist()
+    rpy = robot_pose.get("rpy_rad")
+    yaw_deg = None
+    if rpy is not None:
+        yaw_deg = _rad_to_deg(rpy[2])
+    parts = []
+    if ground_truth_error:
+        gt_delta_ft = _vec3_to_list(ground_truth_error["delta_m"] * meters_to_feet)
+        gt_pos_ft = ground_truth_error["translation_m"] * meters_to_feet
+        parts.append(f"err={gt_pos_ft:.3f}ft d={np.round(gt_delta_ft, 3).tolist()}ft")
+        if ground_truth_error.get("yaw_error_rad") is not None:
+            parts.append(f"yaw_err={_rad_to_deg(ground_truth_error['yaw_error_rad']):.1f}deg")
+        if ground_truth_error.get("rotation_rad") is not None:
+            parts.append(f"rot_err={_rad_to_deg(ground_truth_error['rotation_rad']):.1f}deg")
+        if ground_truth_error.get("gt_rpy_rad") is not None:
+            gt_yaw_deg = _rad_to_deg(ground_truth_error["gt_rpy_rad"][2])
+            parts.append(f"gt_yaw={gt_yaw_deg:.1f}deg")
+    if tag_error:
+        tag_rms_ft = tag_error["rms_translation_m"] * meters_to_feet
+        tag_text = f"tag_rms={tag_rms_ft:.3f}ft"
+        if tag_error.get("count"):
+            tag_text += f" ({tag_error['count']} tags)"
+        parts.append(tag_text)
+    if inlier_ids:
+        parts.append(f"inliers={sorted(inlier_ids)}")
+    error_text = ""
+    if parts:
+        error_text = " | " + " ".join(parts)
+    label = robot_pose.get("label", "pose")
+    yaw_text = f" yaw={yaw_deg:.1f}deg" if yaw_deg is not None else ""
+    return f"{label} t={trans}ft{yaw_text}{error_text}"
 
 
 def main():

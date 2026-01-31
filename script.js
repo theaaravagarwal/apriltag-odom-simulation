@@ -2,40 +2,19 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import * as CANNON from 'cannon-es';
+import TAG_OVERRIDES from "./tag_overrides.json";
 
 const FIELD_MODEL_URL = "./field/model.glb";
 const FIELD_CONFIG_URL = "./field/config.json";
 const ROBOT_MODEL_URL = "./robot/model.glb";
 const ROBOT_CONFIG_URL = "./robot/config.json";
 const OPTIMIZE_MODE = import.meta.env.MODE === "opt" || import.meta.env.VITE_OPT_MODE === "1";
-const CAPTURE_SCALE = OPTIMIZE_MODE ? 0.5 : 1;
+const CAPTURE_SCALE = OPTIMIZE_MODE ? 0.75 : 1.5;
 const CAPTURE_MIME = OPTIMIZE_MODE ? "image/jpeg" : "image/png";
 const CAPTURE_JPEG_QUALITY = OPTIMIZE_MODE ? 0.6 : undefined;
 const VISION_MIN_WIDTH = OPTIMIZE_MODE ? 160 : 240;
 const VISION_MIN_HEIGHT = OPTIMIZE_MODE ? 120 : 180;
 
-const TAG_OVERRIDES = {
-  // Examples:
-  // 1: { position: [-3.607, -3.39, 0.889], rotationDeg: 0 },
-  // 2: { rotationOffsetDeg: 90 },
-  // 3: { rotationX: 45, rotationY: 30, rotationZ: 90 },
-  // "1-5": { rotationY: 180 }, // Applies to tags 1 through 5
-  "3-4": { rotationY: 180, rotationZ: 180 },
-  1: { rotationY: 180, rotationZ: 180 },
-  6: { rotationY: 180, rotationZ: 180 },
-  "13-16": { rotationY: 180, rotationZ: 180 },
-  "25-26": { rotationY: 180, rotationZ: 180 },
-  23: { rotationY: 180, rotationZ: 180 },
-  5: { rotationX: 270, rotationZ: 270, rotationY: 180 },
-  8: { rotationX: 270, rotationZ: 270, rotationY: 180 },
-  2: { rotationX: 270, rotationZ: 90, rotationY: 180 },
-  11: { rotationX: 270, rotationZ: 90, rotationY: 180 },
-  21: { rotationX: 270, rotationZ: 90, rotationY: 180 },
-  24: { rotationX: 270, rotationZ: 90, rotationY: 180 },
-  18: { rotationX: 270, rotationZ: 270, rotationY: 180 },
-  27: { rotationX: 270, rotationZ: 270, rotationY: 180 },
-  28: { rotationX: 180, rotationZ: 0, rotationY: 0 }
-};
 
 let showField = true;
 let showDebugAxes = false;
@@ -1144,6 +1123,32 @@ function startWebsocketSendLoop() {
   }, detectionState.autoCaptureIntervalMs);
 }
 
+const groundTruthVec = new THREE.Vector3();
+const groundTruthQuat = new THREE.Quaternion();
+const groundTruthMat4 = new THREE.Matrix4();
+const groundTruthMat3 = new THREE.Matrix3();
+
+function getRobotWorldPose() {
+  if (!robot) {
+    return null;
+  }
+  robot.updateWorldMatrix(true, false);
+  robot.getWorldPosition(groundTruthVec);
+  robot.getWorldQuaternion(groundTruthQuat);
+  groundTruthMat4.makeRotationFromQuaternion(groundTruthQuat);
+  groundTruthMat3.setFromMatrix4(groundTruthMat4);
+  const e = groundTruthMat3.elements;
+  const rotation = [
+    [e[0], e[3], e[6]],
+    [e[1], e[4], e[7]],
+    [e[2], e[5], e[8]],
+  ];
+  return {
+    translation: [groundTruthVec.x, groundTruthVec.y, groundTruthVec.z],
+    rotation,
+  };
+}
+
 async function sendPovFrame() {
   if (!websocketState.connected || websocketState.sendInFlight) {
     return;
@@ -1156,6 +1161,16 @@ async function sendPovFrame() {
     }
     const arrayBuffer = await blob.arrayBuffer();
     if (websocketState.socket && websocketState.socket.readyState === WebSocket.OPEN) {
+      const groundTruth = getRobotWorldPose();
+      if (groundTruth) {
+        websocketState.socket.send(
+          JSON.stringify({
+            type: "ground_truth",
+            pose: groundTruth,
+            timestamp: Date.now() / 1000,
+          })
+        );
+      }
       websocketState.socket.send(arrayBuffer);
       websocketState.lastSentAt = Date.now();
     }

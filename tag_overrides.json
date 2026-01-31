@@ -1,0 +1,17 @@
+{
+  "3-4": { "rotationY": 180, "rotationZ": 180 },
+  "1": { "rotationY": 180, "rotationZ": 180 },
+  "6": { "rotationY": 180, "rotationZ": 180 },
+  "13-16": { "rotationY": 180, "rotationZ": 180 },
+  "25-26": { "rotationY": 180, "rotationZ": 180 },
+  "23": { "rotationY": 180, "rotationZ": 180 },
+  "5": { "rotationX": 270, "rotationZ": 270, "rotationY": 180 },
+  "8": { "rotationX": 270, "rotationZ": 270, "rotationY": 180 },
+  "2": { "rotationX": 270, "rotationZ": 90, "rotationY": 180 },
+  "11": { "rotationX": 270, "rotationZ": 90, "rotationY": 180 },
+  "21": { "rotationX": 270, "rotationZ": 90, "rotationY": 180 },
+  "24": { "rotationX": 270, "rotationZ": 90, "rotationY": 180 },
+  "18": { "rotationX": 270, "rotationZ": 270, "rotationY": 180 },
+  "27": { "rotationX": 270, "rotationZ": 270, "rotationY": 180 },
+  "28": { "rotationX": 180, "rotationZ": 0, "rotationY": 0 }
+}

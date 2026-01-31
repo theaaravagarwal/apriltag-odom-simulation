@@ -8,7 +8,18 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from tag_map_odometry import compute_camera_pose_from_map, load_tag_map
+from tag_map_odometry import (
+    build_tag_map_from_field_config,
+    compute_camera_pose_from_map,
+    load_tag_map,
+    load_tag_overrides,
+)
+from validation_stream import (
+    compute_ground_truth_error,
+    compute_pose_error,
+    compute_robot_pose_from_camera,
+    format_pose_line,
+)
 from detect_stream import (
     compute_camera_intrinsics,
     detection_to_dict,
@@ -100,16 +111,27 @@ def make_detector_provider(args, detector_threads):
     return get_detector
 
 
-def maybe_fuse_pose(det_dicts, tag_map):
+def maybe_fuse_pose(det_dicts, tag_map, args):
     if not tag_map or not det_dicts:
         return None
-    fused = compute_camera_pose_from_map(det_dicts, tag_map)
+    fused = compute_camera_pose_from_map(
+        det_dicts,
+        tag_map,
+        min_margin=args.min_margin,
+        max_hamming=args.max_hamming,
+        min_inliers=args.min_pose_tags,
+        robust=not args.no_pose_robust,
+        max_translation_dev=args.pose_max_translation_dev,
+        max_rotation_deg=args.pose_max_rotation_deg,
+    )
     if fused is None:
         return None
     return {
         "translation": np.asarray(fused["translation"], dtype=np.float64).tolist(),
         "rotation": np.asarray(fused["rotation"], dtype=np.float64).tolist(),
         "rpy_rad": rotation_to_rpy(fused["rotation"]),
+        "inlier_ids": fused.get("inlier_ids"),
+        "inlier_count": fused.get("inlier_count"),
     }
 
 
@@ -168,7 +190,7 @@ def detect_tags(image, detector, args, camera_config, tag_map, tag_size):
     if args.min_margin > 0:
         det_dicts = [det for det in det_dicts if det["decision_margin"] >= args.min_margin]
 
-    fused_pose = maybe_fuse_pose(det_dicts, tag_map)
+    fused_pose = maybe_fuse_pose(det_dicts, tag_map, args)
     return det_dicts, fused_pose, width, height
 
 
@@ -186,11 +208,14 @@ async def handle_client(websocket, args, detector_provider, tag_map, tag_size, c
     loop = asyncio.get_running_loop()
     latest_message = None
     processing = False
+    last_pose_log = 0.0
+    latest_ground_truth = None
+    latest_ground_truth_time = None
     def is_ws_closed():
         return getattr(websocket, "closed", False) or getattr(websocket, "close_code", None) is not None
 
     async def process_latest():
-        nonlocal latest_message, processing
+        nonlocal latest_message, processing, last_pose_log
         while latest_message is not None:
             message = latest_message
             latest_message = None
@@ -208,6 +233,27 @@ async def handle_client(websocket, args, detector_provider, tag_map, tag_size, c
                 )
                 elapsed_ms = (time.time() - start) * 1000.0
                 response = build_payload(det_dicts, fused_pose, width, height, elapsed_ms)
+                if args.pose_log_interval >= 0:
+                    now = time.time()
+                    if args.pose_log_interval == 0 or (now - last_pose_log) >= args.pose_log_interval:
+                        if fused_pose is not None:
+                            robot_pose = compute_robot_pose_from_camera(
+                                fused_pose,
+                                camera_config,
+                                camera_index=args.camera_index,
+                            )
+                            tag_error = compute_pose_error(det_dicts, tag_map, fused_pose)
+                            gt_pose = None
+                            if latest_ground_truth is not None:
+                                if (
+                                    args.ground_truth_timeout < 0
+                                    or latest_ground_truth_time is None
+                                    or (now - latest_ground_truth_time) <= args.ground_truth_timeout
+                                ):
+                                    gt_pose = latest_ground_truth
+                            gt_error = compute_ground_truth_error(robot_pose, gt_pose)
+                            print(format_pose_line(robot_pose, tag_error, gt_error, fused_pose.get("inlier_ids")))
+                            last_pose_log = now
                 if is_ws_closed():
                     break
                 await websocket.send(json.dumps(response))
@@ -224,6 +270,13 @@ async def handle_client(websocket, args, detector_provider, tag_map, tag_size, c
                 continue
             if payload.get("type") == "ping":
                 await websocket.send(json.dumps({"type": "pong", "timestamp": time.time()}))
+                continue
+            if payload.get("type") == "ground_truth":
+                pose = payload.get("pose") or payload.get("ground_truth")
+                if pose:
+                    latest_ground_truth = pose
+                    latest_ground_truth_time = time.time()
+                continue
             continue
 
         latest_message = message
@@ -250,8 +303,15 @@ async def run_server(args):
         tag_size = 0.1651
 
     tag_map = None
+    if args.tag_map_mode == "auto":
+        overrides = load_tag_overrides(args.tag_overrides)
+        try:
+            tag_map = build_tag_map_from_field_config(field_config, overrides)
+        except Exception as exc:
+            print(f"Tag map auto-build failed: {exc}")
+
     tag_map_path = args.tag_map
-    if tag_map_path:
+    if tag_map is None and tag_map_path:
         if not os.path.isabs(tag_map_path):
             tag_map_path = os.path.join(os.path.dirname(__file__), tag_map_path)
         if os.path.exists(tag_map_path):
@@ -286,6 +346,17 @@ def main(argv=None):
     parser.add_argument("--port", type=int, default=5174, help="Bind port")
     parser.add_argument("--field-config", default="field_config.json", help="Field config JSON")
     parser.add_argument("--tag-map", default="tag_map_field.json", help="Tag map JSON")
+    parser.add_argument(
+        "--tag-map-mode",
+        choices=("auto", "file"),
+        default="auto",
+        help="Build tag map from field config/overrides or load from file",
+    )
+    parser.add_argument(
+        "--tag-overrides",
+        default="../tag_overrides.json",
+        help="Path to tag overrides JSON for auto tag map",
+    )
     parser.add_argument("--camera-config", default="../robot/config.json", help="Robot camera config")
     parser.add_argument("--camera-index", type=int, default=0, help="Camera index in robot config")
     parser.add_argument("--family", default="tag36h11", help="Tag family")
@@ -303,11 +374,38 @@ def main(argv=None):
     parser.add_argument("--refine-edges", type=int, default=1, help="Refine edges (0/1)")
     parser.add_argument("--decode-sharpening", type=float, default=0.35, help="Decode sharpening")
     parser.add_argument("--min-margin", type=float, default=0.0, help="Min decision margin")
+    parser.add_argument("--max-hamming", type=int, default=0, help="Max allowed hamming distance")
+    parser.add_argument("--min-pose-tags", type=int, default=2, help="Min tag count to accept pose")
+    parser.add_argument(
+        "--pose-max-translation-dev",
+        type=float,
+        default=None,
+        help="Max translation deviation for pose inliers (meters)",
+    )
+    parser.add_argument(
+        "--pose-max-rotation-deg",
+        type=float,
+        default=None,
+        help="Max rotation deviation for pose inliers (degrees)",
+    )
+    parser.add_argument("--no-pose-robust", action="store_true", help="Disable robust pose fusion")
     parser.add_argument("--no-enhance", action="store_true", help="Disable CLAHE/unsharp")
     parser.add_argument("--clahe-clip", type=float, default=2.0, help="CLAHE clip limit")
     parser.add_argument("--clahe-grid", type=int, default=8, help="CLAHE grid size")
     parser.add_argument("--unsharp", type=float, default=0.6, help="Unsharp amount")
     parser.add_argument("--unsharp-sigma", type=float, default=1.0, help="Unsharp sigma")
+    parser.add_argument(
+        "--pose-log-interval",
+        type=float,
+        default=0.2,
+        help="Seconds between pose/error console prints (0=every update, <0=disable)",
+    )
+    parser.add_argument(
+        "--ground-truth-timeout",
+        type=float,
+        default=0.5,
+        help="Seconds to keep ground-truth pose before ignoring it (<0=never expire)",
+    )
     parser.add_argument(
         "--max-message-bytes",
         type=int,
