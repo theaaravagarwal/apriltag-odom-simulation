@@ -120,6 +120,37 @@ visionPanel.style.display = "grid";
 visionPanel.style.gap = "6px";
 app.appendChild(visionPanel);
 
+const mentalModelPanel = document.createElement("div");
+mentalModelPanel.style.position = "absolute";
+mentalModelPanel.style.left = "50%";
+mentalModelPanel.style.bottom = "12px";
+mentalModelPanel.style.transform = "translateX(-50%)";
+mentalModelPanel.style.padding = "8px 10px 10px";
+mentalModelPanel.style.background = "rgba(8, 12, 16, 0.9)";
+mentalModelPanel.style.borderRadius = "12px";
+mentalModelPanel.style.boxShadow = "0 10px 30px rgba(0, 0, 0, 0.35)";
+mentalModelPanel.style.pointerEvents = "none";
+mentalModelPanel.style.display = "grid";
+mentalModelPanel.style.gap = "6px";
+mentalModelPanel.style.alignItems = "center";
+app.appendChild(mentalModelPanel);
+
+const mentalModelLabel = document.createElement("div");
+mentalModelLabel.textContent = "Mental Model";
+mentalModelLabel.style.fontFamily =
+  "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace";
+mentalModelLabel.style.fontSize = "11px";
+mentalModelLabel.style.color = "rgba(248, 250, 252, 0.9)";
+mentalModelLabel.style.letterSpacing = "0.04em";
+mentalModelLabel.style.textTransform = "uppercase";
+mentalModelPanel.appendChild(mentalModelLabel);
+
+const mentalModelCanvas = document.createElement("canvas");
+mentalModelCanvas.style.display = "block";
+mentalModelCanvas.style.borderRadius = "8px";
+mentalModelCanvas.style.background = "#0b1118";
+mentalModelPanel.appendChild(mentalModelCanvas);
+
 const visionLabel = document.createElement("div");
 visionLabel.textContent = "POV Stream";
 visionLabel.style.fontFamily =
@@ -268,6 +299,17 @@ const detectionState = {
   autoCaptureEnabled: true,
   autoCaptureIntervalMs: 100,
   detectionStatus: "waiting", // "waiting", "success", "error"
+};
+
+const mentalModelState = {
+  canvas: mentalModelCanvas,
+  ctx: mentalModelCanvas.getContext("2d"),
+  fieldWidthMeters: null,
+  fieldHeightMeters: null,
+  tagPositions: new Map(),
+  padding: 12,
+  width: 0,
+  height: 0,
 };
 
 const websocketState = {
@@ -630,6 +672,7 @@ function addAprilTags(config) {
 
   const geometryCache = new Map();
   const tagGroup = new THREE.Group();
+  mentalModelState.tagPositions.clear();
 
   config.aprilTags.forEach((tag) => {
     const geometry = getTagGeometry(tag.variant, geometryCache);
@@ -637,6 +680,10 @@ function addAprilTags(config) {
     const mesh = new THREE.Mesh(geometry, material);
     const override = getTagOverride(tag.id);
     const position = override.position || tag.position;
+    mentalModelState.tagPositions.set(tag.id, {
+      x: position[0],
+      y: position[1],
+    });
     const configSpin = getTagSpin(tag.rotations);
     const overrideSpin =
       typeof override.rotationDeg === "number"
@@ -1172,6 +1219,94 @@ function updateDetectionStatusUI() {
   }
 }
 
+function updateMentalModelSize() {
+  if (!mentalModelState.fieldWidthMeters || !mentalModelState.fieldHeightMeters) {
+    return;
+  }
+  const maxWidth = Math.min(360, Math.max(220, window.innerWidth - 40));
+  const aspect = mentalModelState.fieldHeightMeters / mentalModelState.fieldWidthMeters;
+  const width = Math.round(maxWidth);
+  const height = Math.max(120, Math.round(width * aspect));
+
+  mentalModelState.width = width;
+  mentalModelState.height = height;
+  mentalModelState.canvas.width = width;
+  mentalModelState.canvas.height = height;
+  mentalModelState.canvas.style.width = `${width}px`;
+  mentalModelState.canvas.style.height = `${height}px`;
+}
+
+function updateMentalModel() {
+  const { ctx, width, height, fieldWidthMeters, fieldHeightMeters, padding } = mentalModelState;
+  if (!ctx || !width || !height || !fieldWidthMeters || !fieldHeightMeters) {
+    return;
+  }
+
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "#0b1118";
+  ctx.fillRect(0, 0, width, height);
+
+  const scale = Math.min(
+    (width - padding * 2) / fieldWidthMeters,
+    (height - padding * 2) / fieldHeightMeters
+  );
+  const centerX = width / 2;
+  const centerY = height / 2;
+  const halfWidth = (fieldWidthMeters / 2) * scale;
+  const halfHeight = (fieldHeightMeters / 2) * scale;
+
+  ctx.strokeStyle = "rgba(148, 163, 184, 0.55)";
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(centerX - halfWidth, centerY - halfHeight, halfWidth * 2, halfHeight * 2);
+
+  const ageMs = Date.now() - detectionState.lastUpdated;
+  const hasFreshDetections =
+    detectionState.detectionStatus === "success" &&
+    detectionState.detections.length > 0 &&
+    ageMs < 1000;
+
+  if (!hasFreshDetections) {
+    ctx.font =
+      "11px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace";
+    ctx.fillStyle = "rgba(148, 163, 184, 0.8)";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("No current tags", centerX, centerY);
+    return;
+  }
+
+  const uniqueIds = new Set();
+  detectionState.detections.forEach((det) => {
+    if (Number.isFinite(det.id)) {
+      uniqueIds.add(det.id);
+    }
+  });
+
+  ctx.font =
+    "10px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+
+  uniqueIds.forEach((id) => {
+    const position = mentalModelState.tagPositions.get(id);
+    if (!position) {
+      return;
+    }
+    const x = centerX + position.x * scale;
+    const y = centerY - position.y * scale;
+
+    ctx.beginPath();
+    ctx.arc(x, y, 4, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(56, 189, 248, 0.95)";
+    ctx.fill();
+
+    ctx.fillStyle = "rgba(15, 23, 42, 0.85)";
+    ctx.fillRect(x + 4, y - 9, 18, 12);
+    ctx.fillStyle = "rgba(248, 250, 252, 0.9)";
+    ctx.fillText(String(id), x + 7, y - 3);
+  });
+}
+
 function updateVisionStream() {
   if (!visionState.enabled) {
     return;
@@ -1700,6 +1835,9 @@ async function init() {
   const heightMeters = inchesToMeters(config.heightInches);
   const maxDim = Math.max(widthMeters, heightMeters);
   const robotSize = inchesToMeters(24);
+  mentalModelState.fieldWidthMeters = widthMeters;
+  mentalModelState.fieldHeightMeters = heightMeters;
+  updateMentalModelSize();
 
   frameCamera(widthMeters, heightMeters);
   robotMotion.speed = Math.max(1.2, maxDim * 0.14);
@@ -1814,6 +1952,7 @@ function onResize() {
   povCamera.updateProjectionMatrix();
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
   renderer.setSize(window.innerWidth, window.innerHeight);
+  updateMentalModelSize();
 }
 
 window.addEventListener("resize", onResize);
@@ -1876,6 +2015,7 @@ function animate() {
   renderer.setViewport(0, 0, window.innerWidth, window.innerHeight);
   renderer.render(scene, mainCamera);
   updateVisionStream();
+  updateMentalModel();
   updateHud();
 }
 
