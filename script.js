@@ -105,6 +105,38 @@ offsetPanel.style.minWidth = "200px";
 offsetPanel.style.pointerEvents = "auto"
 app.appendChild(offsetPanel);
 
+const constantsPanel = document.createElement("div");
+constantsPanel.style.display = "grid";
+constantsPanel.style.gap = "6px";
+constantsPanel.style.paddingTop = "6px";
+constantsPanel.style.borderTop = "1px solid rgba(255, 255, 255, 0.08)";
+offsetPanel.appendChild(constantsPanel);
+
+const constantsTitle = document.createElement("div");
+constantsTitle.textContent = "Localization Constants";
+constantsTitle.style.fontWeight = "600";
+constantsPanel.appendChild(constantsTitle);
+
+const constantsBody = document.createElement("div");
+constantsBody.style.whiteSpace = "pre";
+constantsBody.style.fontFamily =
+  "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace";
+constantsBody.style.fontSize = "11px";
+constantsBody.style.color = "rgba(226, 232, 240, 0.9)";
+constantsPanel.appendChild(constantsBody);
+
+const cameraControlsPanel = document.createElement("div");
+cameraControlsPanel.style.display = "grid";
+cameraControlsPanel.style.gap = "6px";
+cameraControlsPanel.style.paddingTop = "6px";
+cameraControlsPanel.style.borderTop = "1px solid rgba(255, 255, 255, 0.08)";
+constantsPanel.appendChild(cameraControlsPanel);
+
+const cameraControlsTitle = document.createElement("div");
+cameraControlsTitle.textContent = "Camera Adjust";
+cameraControlsTitle.style.fontWeight = "600";
+cameraControlsPanel.appendChild(cameraControlsTitle);
+
 const visionPanel = document.createElement("div");
 visionPanel.style.position = "absolute";
 visionPanel.style.left = "250px";
@@ -310,6 +342,8 @@ const mentalModelState = {
   padding: 12,
   width: 0,
   height: 0,
+  robotEstimate: null,
+  lastRobotEstimate: null,
 };
 
 const websocketState = {
@@ -433,6 +467,42 @@ function createSettingSlider(labelText, min, max, step, initialValue, unit, onCh
   offsetPanel.appendChild(container);
 }
 
+function createCameraSlider(labelText, min, max, step, initialValue, unit, onChange) {
+  const container = document.createElement("div");
+  container.style.display = "grid";
+  container.style.gap = "4px";
+
+  const label = document.createElement("label");
+  label.style.display = "flex";
+  label.style.justifyContent = "space-between";
+  label.style.alignItems = "center";
+  label.style.gap = "8px";
+  label.style.fontSize = "12px";
+  label.textContent = labelText;
+
+  const value = document.createElement("span");
+  value.textContent = `${initialValue}${unit}`;
+  label.appendChild(value);
+
+  const input = document.createElement("input");
+  input.type = "range";
+  input.min = String(min);
+  input.max = String(max);
+  input.step = String(step);
+  input.value = String(initialValue);
+  input.style.width = "100%";
+
+  input.addEventListener("input", () => {
+    const nextValue = Number(input.value);
+    value.textContent = `${nextValue}${unit}`;
+    onChange(nextValue);
+  });
+
+  container.appendChild(label);
+  container.appendChild(input);
+  cameraControlsPanel.appendChild(container);
+}
+
 function applyRobotVisualOffset() {
   if (!robotVisual || !robotVisualBaseRotation) {
     return;
@@ -497,6 +567,137 @@ function applyRotations(object3d, rotations) {
         console.warn("Unknown rotation axis:", axis);
     }
   });
+}
+
+function formatNumber(value, digits = 2) {
+  if (!Number.isFinite(value)) {
+    return "n/a";
+  }
+  return value.toFixed(digits);
+}
+
+function getCameraRotationDeg(cameraConfig, axis) {
+  if (!cameraConfig || !Array.isArray(cameraConfig.rotations)) {
+    return 0;
+  }
+  const entry = cameraConfig.rotations.find((rot) => rot.axis === axis);
+  return entry ? Number(entry.degrees) || 0 : 0;
+}
+
+function setCameraRotationDeg(cameraConfig, axis, degrees) {
+  if (!cameraConfig) {
+    return;
+  }
+  if (!Array.isArray(cameraConfig.rotations)) {
+    cameraConfig.rotations = [];
+  }
+  const entry = cameraConfig.rotations.find((rot) => rot.axis === axis);
+  if (entry) {
+    entry.degrees = degrees;
+  } else {
+    cameraConfig.rotations.push({ axis, degrees });
+  }
+}
+
+function applyCameraConfigToRig() {
+  const cameraConfig = robotCameraState.config;
+  if (!robotCameraState.ready || !cameraConfig) {
+    return;
+  }
+  robotCameraState.rig.position.set(
+    cameraConfig.position?.[0] ?? 0,
+    cameraConfig.position?.[1] ?? 0,
+    cameraConfig.position?.[2] ?? 0
+  );
+  robotCameraState.rig.rotation.set(0, 0, 0);
+  applyRotations(robotCameraState.rig, cameraConfig.rotations);
+
+  if (typeof cameraConfig.fov === "number") {
+    povCamera.fov = cameraConfig.fov;
+    povCamera.updateProjectionMatrix();
+    povCameraBaseFov = povCamera.fov;
+  }
+  updateLocalizationConstants();
+}
+
+function computeCameraIntrinsics(cameraConfig) {
+  const resolution = Array.isArray(cameraConfig?.resolution) ? cameraConfig.resolution : null;
+  const width = resolution?.[0] ?? captureState.width ?? 0;
+  const height = resolution?.[1] ?? captureState.height ?? 0;
+  const fovDeg = typeof cameraConfig?.fov === "number" ? cameraConfig.fov : povCamera.fov;
+  if (!width || !height || !Number.isFinite(fovDeg)) {
+    return null;
+  }
+  const fovRad = THREE.MathUtils.degToRad(fovDeg);
+  const fy = (height / 2) / Math.tan(fovRad / 2);
+  const fx = fy * (width / height);
+  const cx = width / 2;
+  const cy = height / 2;
+  return { width, height, fovDeg, fx, fy, cx, cy };
+}
+
+function updateLocalizationConstants() {
+  const cameraConfig = robotCameraState.config;
+  if (!cameraConfig) {
+    constantsBody.textContent = "camera: n/a";
+    return;
+  }
+  if (cameraControlsPanel.children.length === 1) {
+    const position = cameraConfig.position || [0, 0, 0];
+    createCameraSlider("Cam FOV", 40, 120, 1, cameraConfig.fov ?? 90, "°", (value) => {
+      robotCameraState.config.fov = value;
+      applyCameraConfigToRig();
+    });
+    createCameraSlider("Cam X", -1.5, 1.5, 0.01, position[0] ?? 0, "m", (value) => {
+      const next = robotCameraState.config.position || [0, 0, 0];
+      next[0] = value;
+      robotCameraState.config.position = next;
+      applyCameraConfigToRig();
+    });
+    createCameraSlider("Cam Y", -1.5, 1.5, 0.01, position[1] ?? 0, "m", (value) => {
+      const next = robotCameraState.config.position || [0, 0, 0];
+      next[1] = value;
+      robotCameraState.config.position = next;
+      applyCameraConfigToRig();
+    });
+    createCameraSlider("Cam Z", 0, 2.5, 0.01, position[2] ?? 0.7, "m", (value) => {
+      const next = robotCameraState.config.position || [0, 0, 0];
+      next[2] = value;
+      robotCameraState.config.position = next;
+      applyCameraConfigToRig();
+    });
+    createCameraSlider("Cam Rot X", -180, 180, 1, getCameraRotationDeg(cameraConfig, "x"), "°", (value) => {
+      setCameraRotationDeg(robotCameraState.config, "x", value);
+      applyCameraConfigToRig();
+    });
+    createCameraSlider("Cam Rot Y", -180, 180, 1, getCameraRotationDeg(cameraConfig, "y"), "°", (value) => {
+      setCameraRotationDeg(robotCameraState.config, "y", value);
+      applyCameraConfigToRig();
+    });
+    createCameraSlider("Cam Rot Z", -180, 180, 1, getCameraRotationDeg(cameraConfig, "z"), "°", (value) => {
+      setCameraRotationDeg(robotCameraState.config, "z", value);
+      applyCameraConfigToRig();
+    });
+  }
+  const intrinsics = computeCameraIntrinsics(cameraConfig);
+  const position = cameraConfig.position || [0, 0, 0];
+  const rotations = Array.isArray(cameraConfig.rotations) ? cameraConfig.rotations : [];
+
+  const rotationLines = rotations.length
+    ? rotations.map((rot) => `${rot.axis}=${formatNumber(rot.degrees, 1)}°`).join(" ")
+    : "none";
+
+  const lines = [
+    `res: ${intrinsics ? `${intrinsics.width}x${intrinsics.height}` : "n/a"}`,
+    `fov: ${intrinsics ? formatNumber(intrinsics.fovDeg, 1) : "n/a"}°`,
+    `fx: ${intrinsics ? formatNumber(intrinsics.fx, 2) : "n/a"}`,
+    `fy: ${intrinsics ? formatNumber(intrinsics.fy, 2) : "n/a"}`,
+    `cx: ${intrinsics ? formatNumber(intrinsics.cx, 2) : "n/a"}`,
+    `cy: ${intrinsics ? formatNumber(intrinsics.cy, 2) : "n/a"}`,
+    `pos: [${formatNumber(position[0], 2)}, ${formatNumber(position[1], 2)}, ${formatNumber(position[2], 2)}]`,
+    `rot: ${rotationLines}`,
+  ];
+  constantsBody.textContent = lines.join("\n");
 }
 
 function updateHud() {
@@ -855,23 +1056,12 @@ function configureRobotCamera(robotConfig) {
 
   const cameraConfig = robotConfig.cameras[0];
   robotCameraState.config = cameraConfig;
-  robotCameraState.rig.position.set(
-    cameraConfig.position?.[0] ?? 0,
-    cameraConfig.position?.[1] ?? 0,
-    cameraConfig.position?.[2] ?? 0
-  );
-  robotCameraState.rig.rotation.set(0, 0, 0);
-  applyRotations(robotCameraState.rig, cameraConfig.rotations);
   if (!robotCameraState.rig.parent && robot) {
     robot.add(robotCameraState.rig);
   }
   robotCameraState.ready = true;
 
-  if (typeof cameraConfig.fov === "number") {
-    povCamera.fov = cameraConfig.fov;
-    povCamera.updateProjectionMatrix();
-    povCameraBaseFov = povCamera.fov;
-  }
+  applyCameraConfigToRig();
 
   if (Array.isArray(cameraConfig.resolution) && cameraConfig.resolution.length === 2) {
     captureState.width = cameraConfig.resolution[0];
@@ -880,6 +1070,7 @@ function configureRobotCamera(robotConfig) {
     const targetHeight = Math.max(180, Math.round(cameraConfig.resolution[1] * 0.4));
     ensureVisionTarget(targetWidth, targetHeight);
   }
+  updateLocalizationConstants();
 }
 
 function updateRobotCamera() {
@@ -1236,6 +1427,124 @@ function updateMentalModelSize() {
   mentalModelState.canvas.style.height = `${height}px`;
 }
 
+function computeRobotEstimateFromDetections() {
+  const samples = [];
+  for (const det of detectionState.detections) {
+    if (!det || !Number.isFinite(det.id)) {
+      continue;
+    }
+    const position = mentalModelState.tagPositions.get(det.id);
+    if (!position) {
+      continue;
+    }
+    const pose = det.pose;
+    if (!pose || !Array.isArray(pose.translation) || pose.translation.length < 3) {
+      continue;
+    }
+    const [tx, ty, tz] = pose.translation;
+    if (![tx, ty, tz].every(Number.isFinite)) {
+      continue;
+    }
+    const distance = Math.hypot(tx, ty, tz);
+    if (!Number.isFinite(distance) || distance <= 0) {
+      continue;
+    }
+    samples.push({
+      x: position.x,
+      y: position.y,
+      d: distance,
+    });
+  }
+
+  if (samples.length < 2) {
+    return null;
+  }
+
+  if (samples.length === 2) {
+    const [a, b] = samples;
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const centerDist = Math.hypot(dx, dy);
+    if (!Number.isFinite(centerDist) || centerDist <= 1e-6) {
+      return null;
+    }
+
+    const aLen = (a.d * a.d - b.d * b.d + centerDist * centerDist) / (2 * centerDist);
+    const hSq = a.d * a.d - aLen * aLen;
+    const ux = dx / centerDist;
+    const uy = dy / centerDist;
+    const px = a.x + aLen * ux;
+    const py = a.y + aLen * uy;
+
+    if (hSq <= 0) {
+      return { x: px, y: py, count: 2 };
+    }
+
+    const h = Math.sqrt(hSq);
+    const perpX = -uy;
+    const perpY = ux;
+    const x1 = px + perpX * h;
+    const y1 = py + perpY * h;
+    const x2 = px - perpX * h;
+    const y2 = py - perpY * h;
+
+    const last = mentalModelState.lastRobotEstimate;
+    if (last && Number.isFinite(last.x) && Number.isFinite(last.y)) {
+      const d1 = Math.hypot(x1 - last.x, y1 - last.y);
+      const d2 = Math.hypot(x2 - last.x, y2 - last.y);
+      return d1 <= d2 ? { x: x1, y: y1, count: 2 } : { x: x2, y: y2, count: 2 };
+    }
+
+    const centerScore1 = Math.hypot(x1, y1);
+    const centerScore2 = Math.hypot(x2, y2);
+    return centerScore1 <= centerScore2
+      ? { x: x1, y: y1, count: 2 }
+      : { x: x2, y: y2, count: 2 };
+  }
+
+  const base = samples[0];
+  let sumA11 = 0;
+  let sumA12 = 0;
+  let sumA22 = 0;
+  let sumB1 = 0;
+  let sumB2 = 0;
+
+  for (let i = 1; i < samples.length; i += 1) {
+    const sample = samples[i];
+    const dx = sample.x - base.x;
+    const dy = sample.y - base.y;
+    const bi =
+      sample.d * sample.d -
+      base.d * base.d -
+      sample.x * sample.x +
+      base.x * base.x -
+      sample.y * sample.y +
+      base.y * base.y;
+
+    const a1 = 2 * dx;
+    const a2 = 2 * dy;
+
+    sumA11 += a1 * a1;
+    sumA12 += a1 * a2;
+    sumA22 += a2 * a2;
+    sumB1 += a1 * bi;
+    sumB2 += a2 * bi;
+  }
+
+  const det = sumA11 * sumA22 - sumA12 * sumA12;
+  if (!Number.isFinite(det) || Math.abs(det) < 1e-6) {
+    return null;
+  }
+
+  const x = (sumB1 * sumA22 - sumB2 * sumA12) / det;
+  const y = (sumA11 * sumB2 - sumA12 * sumB1) / det;
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    return null;
+  }
+
+  return { x, y, count: samples.length };
+}
+
 function updateMentalModel() {
   const { ctx, width, height, fieldWidthMeters, fieldHeightMeters, padding } = mentalModelState;
   if (!ctx || !width || !height || !fieldWidthMeters || !fieldHeightMeters) {
@@ -1272,7 +1581,13 @@ function updateMentalModel() {
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText("No current tags", centerX, centerY);
+    mentalModelState.robotEstimate = null;
     return;
+  }
+
+  mentalModelState.robotEstimate = computeRobotEstimateFromDetections();
+  if (mentalModelState.robotEstimate) {
+    mentalModelState.lastRobotEstimate = mentalModelState.robotEstimate;
   }
 
   const uniqueIds = new Set();
@@ -1305,6 +1620,24 @@ function updateMentalModel() {
     ctx.fillStyle = "rgba(248, 250, 252, 0.9)";
     ctx.fillText(String(id), x + 7, y - 3);
   });
+
+  if (mentalModelState.robotEstimate) {
+    const { x, y, count } = mentalModelState.robotEstimate;
+    const rx = centerX + x * scale;
+    const ry = centerY - y * scale;
+    ctx.beginPath();
+    ctx.arc(rx, ry, 6, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(248, 113, 113, 0.95)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(15, 23, 42, 0.85)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.fillStyle = "rgba(15, 23, 42, 0.85)";
+    ctx.fillRect(rx + 6, ry - 11, 44, 14);
+    ctx.fillStyle = "rgba(248, 250, 252, 0.9)";
+    ctx.fillText(`R:${count}`, rx + 9, ry - 4);
+  }
 }
 
 function updateVisionStream() {
@@ -1953,6 +2286,7 @@ function onResize() {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
   renderer.setSize(window.innerWidth, window.innerHeight);
   updateMentalModelSize();
+  updateLocalizationConstants();
 }
 
 window.addEventListener("resize", onResize);
