@@ -125,18 +125,6 @@ constantsBody.style.fontSize = "11px";
 constantsBody.style.color = "rgba(226, 232, 240, 0.9)";
 constantsPanel.appendChild(constantsBody);
 
-const cameraControlsPanel = document.createElement("div");
-cameraControlsPanel.style.display = "grid";
-cameraControlsPanel.style.gap = "6px";
-cameraControlsPanel.style.paddingTop = "6px";
-cameraControlsPanel.style.borderTop = "1px solid rgba(255, 255, 255, 0.08)";
-constantsPanel.appendChild(cameraControlsPanel);
-
-const cameraControlsTitle = document.createElement("div");
-cameraControlsTitle.textContent = "Camera Adjust";
-cameraControlsTitle.style.fontWeight = "600";
-cameraControlsPanel.appendChild(cameraControlsTitle);
-
 const visionPanel = document.createElement("div");
 visionPanel.style.position = "absolute";
 visionPanel.style.left = "250px";
@@ -328,6 +316,7 @@ const detectionState = {
   imageSize: null,
   lastUpdated: 0,
   error: null,
+  fusedPose: null,
   autoCaptureEnabled: true,
   autoCaptureIntervalMs: 100,
   detectionStatus: "waiting", // "waiting", "success", "error"
@@ -359,6 +348,17 @@ const websocketState = {
 };
 
 const tempQuat = new THREE.Quaternion();
+const mapToSimRot = new THREE.Matrix4().set(
+  1, 0, 0, 0,
+  0, 0, -1, 0,
+  0, 1, 0, 0,
+  0, 0, 0, 1
+);
+const tempMat4A = new THREE.Matrix4();
+const tempMat4B = new THREE.Matrix4();
+const tempVec3A = new THREE.Vector3();
+const tempVec3B = new THREE.Vector3(1, 1, 1);
+const tempObj3dA = new THREE.Object3D();
 const povLookState = {
   yaw: 0,
   pitch: 0,
@@ -467,42 +467,6 @@ function createSettingSlider(labelText, min, max, step, initialValue, unit, onCh
   offsetPanel.appendChild(container);
 }
 
-function createCameraSlider(labelText, min, max, step, initialValue, unit, onChange) {
-  const container = document.createElement("div");
-  container.style.display = "grid";
-  container.style.gap = "4px";
-
-  const label = document.createElement("label");
-  label.style.display = "flex";
-  label.style.justifyContent = "space-between";
-  label.style.alignItems = "center";
-  label.style.gap = "8px";
-  label.style.fontSize = "12px";
-  label.textContent = labelText;
-
-  const value = document.createElement("span");
-  value.textContent = `${initialValue}${unit}`;
-  label.appendChild(value);
-
-  const input = document.createElement("input");
-  input.type = "range";
-  input.min = String(min);
-  input.max = String(max);
-  input.step = String(step);
-  input.value = String(initialValue);
-  input.style.width = "100%";
-
-  input.addEventListener("input", () => {
-    const nextValue = Number(input.value);
-    value.textContent = `${nextValue}${unit}`;
-    onChange(nextValue);
-  });
-
-  container.appendChild(label);
-  container.appendChild(input);
-  cameraControlsPanel.appendChild(container);
-}
-
 function applyRobotVisualOffset() {
   if (!robotVisual || !robotVisualBaseRotation) {
     return;
@@ -576,29 +540,6 @@ function formatNumber(value, digits = 2) {
   return value.toFixed(digits);
 }
 
-function getCameraRotationDeg(cameraConfig, axis) {
-  if (!cameraConfig || !Array.isArray(cameraConfig.rotations)) {
-    return 0;
-  }
-  const entry = cameraConfig.rotations.find((rot) => rot.axis === axis);
-  return entry ? Number(entry.degrees) || 0 : 0;
-}
-
-function setCameraRotationDeg(cameraConfig, axis, degrees) {
-  if (!cameraConfig) {
-    return;
-  }
-  if (!Array.isArray(cameraConfig.rotations)) {
-    cameraConfig.rotations = [];
-  }
-  const entry = cameraConfig.rotations.find((rot) => rot.axis === axis);
-  if (entry) {
-    entry.degrees = degrees;
-  } else {
-    cameraConfig.rotations.push({ axis, degrees });
-  }
-}
-
 function applyCameraConfigToRig() {
   const cameraConfig = robotCameraState.config;
   if (!robotCameraState.ready || !cameraConfig) {
@@ -641,43 +582,6 @@ function updateLocalizationConstants() {
   if (!cameraConfig) {
     constantsBody.textContent = "camera: n/a";
     return;
-  }
-  if (cameraControlsPanel.children.length === 1) {
-    const position = cameraConfig.position || [0, 0, 0];
-    createCameraSlider("Cam FOV", 40, 120, 1, cameraConfig.fov ?? 90, "°", (value) => {
-      robotCameraState.config.fov = value;
-      applyCameraConfigToRig();
-    });
-    createCameraSlider("Cam X", -1.5, 1.5, 0.01, position[0] ?? 0, "m", (value) => {
-      const next = robotCameraState.config.position || [0, 0, 0];
-      next[0] = value;
-      robotCameraState.config.position = next;
-      applyCameraConfigToRig();
-    });
-    createCameraSlider("Cam Y", -1.5, 1.5, 0.01, position[1] ?? 0, "m", (value) => {
-      const next = robotCameraState.config.position || [0, 0, 0];
-      next[1] = value;
-      robotCameraState.config.position = next;
-      applyCameraConfigToRig();
-    });
-    createCameraSlider("Cam Z", 0, 2.5, 0.01, position[2] ?? 0.7, "m", (value) => {
-      const next = robotCameraState.config.position || [0, 0, 0];
-      next[2] = value;
-      robotCameraState.config.position = next;
-      applyCameraConfigToRig();
-    });
-    createCameraSlider("Cam Rot X", -180, 180, 1, getCameraRotationDeg(cameraConfig, "x"), "°", (value) => {
-      setCameraRotationDeg(robotCameraState.config, "x", value);
-      applyCameraConfigToRig();
-    });
-    createCameraSlider("Cam Rot Y", -180, 180, 1, getCameraRotationDeg(cameraConfig, "y"), "°", (value) => {
-      setCameraRotationDeg(robotCameraState.config, "y", value);
-      applyCameraConfigToRig();
-    });
-    createCameraSlider("Cam Rot Z", -180, 180, 1, getCameraRotationDeg(cameraConfig, "z"), "°", (value) => {
-      setCameraRotationDeg(robotCameraState.config, "z", value);
-      applyCameraConfigToRig();
-    });
   }
   const intrinsics = computeCameraIntrinsics(cameraConfig);
   const position = cameraConfig.position || [0, 0, 0];
@@ -1273,11 +1177,13 @@ function handleDetectionMessage(data) {
   }
   if (data.type === "error") {
     setDetectionStatus("error", data.message || "Detection error");
+    detectionState.fusedPose = null;
     return;
   }
   if (data.detections) {
     detectionState.detections = data.detections;
     detectionState.imageSize = data.image_size || data.imageSize || [960, 720];
+    detectionState.fusedPose = data.fused_pose || data.fusedPose || null;
     detectionState.lastUpdated = Date.now();
     setDetectionStatus("success", null);
   }
@@ -1428,6 +1334,11 @@ function updateMentalModelSize() {
 }
 
 function computeRobotEstimateFromDetections() {
+  const fusedEstimate = computeRobotEstimateFromFusedPose();
+  if (fusedEstimate) {
+    return fusedEstimate;
+  }
+
   const samples = [];
   for (const det of detectionState.detections) {
     if (!det || !Number.isFinite(det.id)) {
@@ -1545,6 +1456,81 @@ function computeRobotEstimateFromDetections() {
   return { x, y, count: samples.length };
 }
 
+function computeRobotEstimateFromFusedPose() {
+  const fused = detectionState.fusedPose;
+  if (!fused) {
+    return null;
+  }
+  if (!Array.isArray(fused.translation) || fused.translation.length < 3) {
+    return null;
+  }
+  const rotation = fused.rotation;
+  if (
+    !Array.isArray(rotation) ||
+    rotation.length !== 3 ||
+    !rotation.every((row) => Array.isArray(row) && row.length === 3)
+  ) {
+    return null;
+  }
+
+  const cameraConfig = robotCameraState.config;
+  if (!cameraConfig) {
+    return null;
+  }
+
+  const [cx, cy, cz] = fused.translation;
+  if (![cx, cy, cz].every(Number.isFinite)) {
+    return null;
+  }
+
+  tempMat4A.set(
+    rotation[0][0],
+    rotation[0][1],
+    rotation[0][2],
+    0,
+    rotation[1][0],
+    rotation[1][1],
+    rotation[1][2],
+    0,
+    rotation[2][0],
+    rotation[2][1],
+    rotation[2][2],
+    0,
+    0,
+    0,
+    0,
+    1
+  );
+
+  tempMat4B.copy(mapToSimRot).multiply(tempMat4A);
+  tempQuat.setFromRotationMatrix(tempMat4B);
+  tempVec3A.set(cx, cy, cz).applyMatrix4(mapToSimRot);
+  tempMat4A.compose(tempVec3A, tempQuat, tempVec3B);
+
+  tempObj3dA.position.set(
+    cameraConfig.position?.[0] ?? 0,
+    cameraConfig.position?.[1] ?? 0,
+    cameraConfig.position?.[2] ?? 0
+  );
+  tempObj3dA.rotation.set(0, 0, 0);
+  applyRotations(tempObj3dA, cameraConfig.rotations);
+  tempObj3dA.updateMatrix();
+
+  tempMat4B.copy(tempObj3dA.matrix).invert();
+  tempMat4A.multiply(tempMat4B);
+  tempVec3A.setFromMatrixPosition(tempMat4A);
+
+  if (!Number.isFinite(tempVec3A.x) || !Number.isFinite(tempVec3A.y)) {
+    return null;
+  }
+
+  return {
+    x: tempVec3A.x,
+    y: tempVec3A.y,
+    count: detectionState.detections.length,
+  };
+}
+
 function updateMentalModel() {
   const { ctx, width, height, fieldWidthMeters, fieldHeightMeters, padding } = mentalModelState;
   if (!ctx || !width || !height || !fieldWidthMeters || !fieldHeightMeters) {
@@ -1587,6 +1573,23 @@ function updateMentalModel() {
 
   mentalModelState.robotEstimate = computeRobotEstimateFromDetections();
   if (mentalModelState.robotEstimate) {
+    let avgX = null;
+    let avgCount = 0;
+    detectionState.detections.forEach((det) => {
+      if (!Number.isFinite(det.id)) {
+        return;
+      }
+      const position = mentalModelState.tagPositions.get(det.id);
+      if (!position || !Number.isFinite(position.x)) {
+        return;
+      }
+      avgX = (avgX ?? 0) + position.x;
+      avgCount += 1;
+    });
+    if (avgCount > 0) {
+      avgX /= avgCount;
+      mentalModelState.robotEstimate.x = 2 * avgX - mentalModelState.robotEstimate.x;
+    }
     mentalModelState.lastRobotEstimate = mentalModelState.robotEstimate;
   }
 
